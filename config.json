@@ -1,0 +1,14 @@
+{
+  "wifi_ssid": "",
+  "wifi_password": "",
+  "server_base_url": "http://sitiobarreiras.app.br:55432",
+  "auth_header": "sbs",
+  "relay_pin": 18,
+  "gate_open_duration": 5,
+  "pin_barrier": 2,
+  "pin_hall": 3,
+  "pin_aux": 4,
+  "rfid_uart_id": 0,
+  "rfid_baudrate": 9600,
+  "rfid_rx_pin": 5
+}

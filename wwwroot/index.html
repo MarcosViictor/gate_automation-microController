@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Gate Automation - MicroControlador</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-primary: #0f172a;
+      --bg-card: rgba(30, 41, 59, 0.7);
+      --bg-card-hover: rgba(51, 65, 85, 0.8);
+      --text-main: #f8fafc;
+      --text-muted: #94a3b8;
+      --accent-blue: #38bdf8;
+      --accent-green: #22c55e;
+      --accent-red: #ef4444;
+      --accent-yellow: #eab308;
+      --border-color: rgba(255, 255, 255, 0.1);
+      --radius: 12px;
+      --shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: 'Inter', sans-serif;
+    }
+
+    body {
+      background: var(--bg-primary);
+      background-image: radial-gradient(at 0% 0%, rgba(56, 189, 248, 0.12) 0px, transparent 50%),
+                        radial-gradient(at 100% 100%, rgba(34, 197, 94, 0.1) 0px, transparent 50%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 900px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    header h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 6px;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    /* Tabs Navigation */
+    .tabs {
+      display: flex;
+      gap: 8px;
+      background: rgba(15, 23, 42, 0.6);
+      padding: 6px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border-color);
+      margin-bottom: 20px;
+    }
+
+    .tab-btn {
+      flex: 1;
+      padding: 12px;
+      border: none;
+      background: transparent;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      font-weight: 600;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .tab-btn.active {
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent-blue);
+      border: 1px solid rgba(56, 189, 248, 0.3);
+    }
+
+    .tab-btn:hover:not(.active) {
+      color: var(--text-main);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    /* Tab Content Panels */
+    .tab-content {
+      display: none;
+      animation: fadeIn 0.3s ease;
+    }
+
+    .tab-content.active {
+      display: block;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Cards */
+    .card {
+      background: var(--bg-card);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 20px;
+      margin-bottom: 20px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--accent-blue);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* Grid layout for sensors */
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 20px;
+    }
+
+    .sensor-card {
+      background: rgba(15, 23, 42, 0.5);
+      border: 1px solid var(--border-color);
+      border-radius: var(--radius);
+      padding: 16px;
+      text-align: center;
+      transition: transform 0.2s;
+    }
+
+    .sensor-card:hover {
+      transform: translateY(-2px);
+    }
+
+    .sensor-title {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+    }
+
+    .sensor-badge {
+      display: inline-block;
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .badge-green { background: rgba(34, 197, 94, 0.2); color: var(--accent-green); border: 1px solid var(--accent-green); }
+    .badge-red { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); border: 1px solid var(--accent-red); }
+    .badge-yellow { background: rgba(234, 179, 8, 0.2); color: var(--accent-yellow); border: 1px solid var(--accent-yellow); }
+    .badge-blue { background: rgba(56, 189, 248, 0.2); color: var(--accent-blue); border: 1px solid var(--accent-blue); }
+
+    /* Action Buttons */
+    .btn {
+      width: 100%;
+      padding: 14px;
+      border: none;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #0284c7, #0369a1);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 4px 12px rgba(2, 132, 199, 0.3);
+    }
+
+    .btn:hover {
+      opacity: 0.95;
+      transform: translateY(-1px);
+    }
+
+    .btn:disabled {
+      background: #475569;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    /* Forms */
+    .form-group {
+      margin-bottom: 16px;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 6px;
+      font-weight: 500;
+    }
+
+    .form-control {
+      width: 100%;
+      padding: 12px;
+      background: rgba(15, 23, 42, 0.8);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      color: var(--text-main);
+      font-size: 0.95rem;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    .form-control:focus {
+      border-color: var(--accent-blue);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    @media (max-width: 600px) {
+      .form-row { grid-template-columns: 1fr; }
+    }
+
+    /* Table */
+    .table-responsive {
+      width: 100%;
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      text-align: left;
+      font-size: 0.9rem;
+    }
+
+    th {
+      padding: 12px;
+      border-bottom: 1px solid var(--border-color);
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    td {
+      padding: 12px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      padding: 12px 20px;
+      border-radius: 8px;
+      background: #1e293b;
+      color: #fff;
+      border: 1px solid var(--accent-blue);
+      box-shadow: var(--shadow);
+      display: none;
+      z-index: 1000;
+      animation: fadeIn 0.3s;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    <header>
+      <h1>Gate Automation MicroController</h1>
+      <p id="system-status-subtitle">Carregando status do sistema...</p>
+    </header>
+
+    <!-- Navigation Tabs -->
+    <nav class="tabs">
+      <button class="tab-btn active" onclick="switchTab('status')">
+        <span>📊</span> Status & Sensores
+      </button>
+      <button class="tab-btn" onclick="switchTab('tags')">
+        <span>🏷️</span> Tags & Acesso
+      </button>
+      <button class="tab-btn" onclick="switchTab('config')">
+        <span>⚙️</span> Configurações
+      </button>
+    </nav>
+
+    <!-- TAB 1: Status & Sensores -->
+    <div id="tab-status" class="tab-content active">
+      <div class="card">
+        <h2><span>📡</span> Sensores em Tempo Real</h2>
+        <div class="sensor-grid">
+          
+          <div class="sensor-card">
+            <div class="sensor-title">1. Sensor de Barreira</div>
+            <div id="badge-barrier" class="sensor-badge badge-green">Acesso Livre</div>
+          </div>
+
+          <div class="sensor-card">
+            <div class="sensor-title">2. Sensor Hall (Portão)</div>
+            <div id="badge-hall" class="sensor-badge badge-blue">Fechado</div>
+          </div>
+
+          <div class="sensor-card">
+            <div class="sensor-title">3. Sensor Auxiliar</div>
+            <div id="badge-aux" class="sensor-badge badge-yellow">Em Espera</div>
+          </div>
+
+          <div class="sensor-card">
+            <div class="sensor-title">4. Última Tag RFID</div>
+            <div id="badge-rfid" class="sensor-badge badge-blue">Nenhuma</div>
+          </div>
+
+        </div>
+
+        <div style="margin-top: 10px;">
+          <button id="btn-trigger-gate" class="btn" onclick="triggerGate()">
+            <span>🚪</span> Acionar Abertura do Portão
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2><span>ℹ️</span> Status de Rede & Relé</h2>
+        <div class="form-row">
+          <div>
+            <p style="color: var(--text-muted); font-size: 0.85rem;">Conexão Wi-Fi:</p>
+            <p id="info-wifi-mode" style="font-weight: 600;">--</p>
+          </div>
+          <div>
+            <p style="color: var(--text-muted); font-size: 0.85rem;">Endereço IP:</p>
+            <p id="info-wifi-ip" style="font-weight: 600;">--</p>
+          </div>
+          <div>
+            <p style="color: var(--text-muted); font-size: 0.85rem;">Pino do Relé:</p>
+            <p id="info-relay-pin" style="font-weight: 600;">--</p>
+          </div>
+          <div>
+            <p style="color: var(--text-muted); font-size: 0.85rem;">Última Ação do Relé:</p>
+            <p id="info-relay-status" style="font-weight: 600;">--</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 2: Tags & Acesso -->
+    <div id="tab-tags" class="tab-content">
+      <div class="card">
+        <h2><span>🔍</span> Teste Manual de Tag RFID</h2>
+        <form id="form-scan" onsubmit="handleManualScan(event)">
+          <div class="form-group">
+            <label for="input-test-tag">Código da Tag RFID:</label>
+            <div style="display: flex; gap: 10px;">
+              <input type="text" id="input-test-tag" class="form-control" placeholder="Ex: 01E28069150000401D63E8C9" required>
+              <button type="submit" class="btn" style="width: auto; padding: 0 20px;">Consultar</button>
+            </div>
+          </div>
+        </form>
+      </div>
+
+      <div class="card">
+        <h2><span>📋</span> Histórico de Leituras de Tags</h2>
+        <div class="table-responsive">
+          <table>
+            <thead>
+              <tr>
+                <th>Data/Hora</th>
+                <th>Código Tag</th>
+                <th>Autorização</th>
+                <th>Barreira</th>
+                <th>Resultado</th>
+              </tr>
+            </thead>
+            <tbody id="table-logs-body">
+              <tr>
+                <td colspan="5" style="text-align: center; color: var(--text-muted);">Nenhum histórico disponível.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- TAB 3: Configurações -->
+    <div id="tab-config" class="tab-content">
+      <div class="card">
+        <h2><span>⚙️</span> Configurações de Rede e Servidor Local</h2>
+        <form id="form-config" onsubmit="handleSaveConfig(event)">
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-wifi-ssid">SSID do Wi-Fi:</label>
+              <input type="text" id="cfg-wifi-ssid" class="form-control" placeholder="Nome da rede sem fio">
+            </div>
+            <div class="form-group">
+              <label for="cfg-wifi-pass">Senha do Wi-Fi:</label>
+              <input type="password" id="cfg-wifi-pass" class="form-control" placeholder="Senha da rede">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="cfg-server-url">URL do Servidor Local (API):</label>
+            <input type="text" id="cfg-server-url" class="form-control" placeholder="http://sitiobarreiras.app.br:55432" required>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-relay-pin">Pino GPIO do Relé:</label>
+              <input type="number" id="cfg-relay-pin" class="form-control" value="18" required>
+            </div>
+            <div class="form-group">
+              <label for="cfg-gate-duration">Tempo Abertura Portão (segundos):</label>
+              <input type="number" id="cfg-gate-duration" class="form-control" value="5" required>
+            </div>
+          </div>
+
+          <h3 style="font-size: 1rem; color: var(--text-muted); margin: 16px 0 12px 0;">Pinagem dos Sensores</h3>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-pin-barrier">Pino Sensor Barreira:</label>
+              <input type="number" id="cfg-pin-barrier" class="form-control" value="2" required>
+            </div>
+            <div class="form-group">
+              <label for="cfg-pin-hall">Pino Sensor Hall:</label>
+              <input type="number" id="cfg-pin-hall" class="form-control" value="3" required>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="cfg-pin-aux">Pino Sensor Auxiliar/Botoeira:</label>
+              <input type="number" id="cfg-pin-aux" class="form-control" value="4" required>
+            </div>
+            <div class="form-group">
+              <label for="cfg-rfid-rx">Pino RX UART RFID:</label>
+              <input type="number" id="cfg-rfid-rx" class="form-control" value="5" required>
+            </div>
+          </div>
+
+          <div style="margin-top: 10px;">
+            <button type="submit" class="btn">💾 Salvar Configurações</button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+
+  </div>
+
+  <div id="toast" class="toast"></div>
+
+  <script>
+    // Tab switching
+    function switchTab(tabId) {
+      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+      
+      const selectedBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick').includes(tabId));
+      if (selectedBtn) selectedBtn.classList.add('active');
+
+      const targetContent = document.getElementById('tab-' + tabId);
+      if (targetContent) targetContent.classList.add('active');
+
+      if (tabId === 'tags') fetchLogs();
+      if (tabId === 'config') fetchConfig();
+    }
+
+    function showToast(msg, duration = 3000) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.style.display = 'block';
+      setTimeout(() => { t.style.display = 'none'; }, duration);
+    }
+
+    // Secure DOM Update helpers
+    function setBadge(id, text, type) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.textContent = text;
+      el.className = 'sensor-badge badge-' + type;
+    }
+
+    function updateStatus() {
+      fetch('/api/status')
+        .then(res => res.json())
+        .then(data => {
+          // Subtitle
+          const sub = document.getElementById('system-status-subtitle');
+          if (sub) sub.textContent = 'IP: ' + (data.wifi.ip || '127.0.0.1') + ' (' + data.wifi.mode + ')';
+
+          // 1. Barrier
+          if (data.sensors.barrier.clear) {
+            setBadge('badge-barrier', 'Acesso Livre', 'green');
+          } else {
+            setBadge('badge-barrier', 'Veículo no Caminho', 'red');
+          }
+
+          // 2. Hall Sensor
+          const hallLabel = data.sensors.hall.label;
+          if (hallLabel === 'Fechado') {
+            setBadge('badge-hall', 'Portão Fechado', 'blue');
+          } else {
+            setBadge('badge-hall', 'Portão Aberto', 'yellow');
+          }
+
+          // 3. Aux Sensor
+          if (data.sensors.aux.pressed) {
+            setBadge('badge-aux', 'Pressionado', 'red');
+          } else {
+            setBadge('badge-aux', 'Em Espera', 'yellow');
+          }
+
+          // 4. RFID
+          const lastTag = data.sensors.rfid.last_tag;
+          setBadge('badge-rfid', lastTag, 'blue');
+
+          // Info boxes
+          document.getElementById('info-wifi-mode').textContent = data.wifi.mode + ' (' + (data.wifi.connected ? 'Conectado' : 'Desconectado') + ')';
+          document.getElementById('info-wifi-ip').textContent = data.wifi.ip;
+          document.getElementById('info-relay-pin').textContent = 'GPIO ' + data.relay.relay_pin;
+          document.getElementById('info-relay-status').textContent = data.relay.last_status;
+
+          const triggerBtn = document.getElementById('btn-trigger-gate');
+          if (triggerBtn) triggerBtn.disabled = data.relay.is_busy;
+        })
+        .catch(err => console.error('Erro ao atualizar status:', err));
+    }
+
+    function triggerGate() {
+      fetch('/api/trigger', { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          showToast(data.message || data.error);
+          updateStatus();
+        })
+        .catch(err => showToast('Erro ao enviar comando de abertura'));
+    }
+
+    function handleManualScan(e) {
+      e.preventDefault();
+      const input = document.getElementById('input-test-tag');
+      const code = input.value.trim();
+      if (!code) return;
+
+      fetch('/api/scan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: code })
+      })
+      .then(res => res.json())
+      .then(data => {
+        showToast(data.reason || 'Tag processada');
+        input.value = '';
+        fetchLogs();
+      })
+      .catch(err => showToast('Erro ao testar tag'));
+    }
+
+    function fetchLogs() {
+      fetch('/api/tags')
+        .then(res => res.json())
+        .then(logs => {
+          const tbody = document.getElementById('table-logs-body');
+          tbody.replaceChildren(); // Safe clear
+
+          if (!logs || logs.length === 0) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 5;
+            td.style.textAlign = 'center';
+            td.style.color = 'var(--text-muted)';
+            td.textContent = 'Nenhum histórico disponível.';
+            tr.appendChild(td);
+            tbody.appendChild(tr);
+            return;
+          }
+
+          logs.forEach(log => {
+            const tr = document.createElement('tr');
+
+            const tdTime = document.createElement('td');
+            tdTime.textContent = new Date(log.timestamp * 1000).toLocaleTimeString();
+            tr.appendChild(tdTime);
+
+            const tdCode = document.createElement('td');
+            tdCode.style.fontWeight = '600';
+            tdCode.textContent = log.tag_code;
+            tr.appendChild(tdCode);
+
+            const tdAuth = document.createElement('td');
+            const spanAuth = document.createElement('span');
+            spanAuth.className = log.authorized ? 'sensor-badge badge-green' : 'sensor-badge badge-red';
+            spanAuth.textContent = log.authorized ? 'Autorizada' : 'Negada';
+            tdAuth.appendChild(spanAuth);
+            tr.appendChild(tdAuth);
+
+            const tdBarrier = document.createElement('td');
+            const spanBarrier = document.createElement('span');
+            spanBarrier.className = log.barrier_clear ? 'sensor-badge badge-green' : 'sensor-badge badge-red';
+            spanBarrier.textContent = log.barrier_clear ? 'Livre' : 'Obstruído';
+            tdBarrier.appendChild(spanBarrier);
+            tr.appendChild(tdBarrier);
+
+            const tdReason = document.createElement('td');
+            tdReason.textContent = log.reason;
+            tr.appendChild(tdReason);
+
+            tbody.appendChild(tr);
+          });
+        })
+        .catch(err => console.error('Erro ao buscar historico:', err));
+    }
+
+    function fetchConfig() {
+      fetch('/api/config')
+        .then(res => res.json())
+        .then(cfg => {
+          document.getElementById('cfg-wifi-ssid').value = cfg.wifi_ssid || '';
+          document.getElementById('cfg-wifi-pass').value = cfg.wifi_password || '';
+          document.getElementById('cfg-server-url').value = cfg.server_base_url || '';
+          document.getElementById('cfg-relay-pin').value = cfg.relay_pin || 18;
+          document.getElementById('cfg-gate-duration').value = cfg.gate_open_duration || 5;
+          document.getElementById('cfg-pin-barrier').value = cfg.pin_barrier || 2;
+          document.getElementById('cfg-pin-hall').value = cfg.pin_hall || 3;
+          document.getElementById('cfg-pin-aux').value = cfg.pin_aux || 4;
+          document.getElementById('cfg-rfid-rx').value = cfg.rfid_rx_pin || 5;
+        })
+        .catch(err => console.error('Erro ao carregar configuracoes:', err));
+    }
+
+    function handleSaveConfig(e) {
+      e.preventDefault();
+      const payload = {
+        wifi_ssid: document.getElementById('cfg-wifi-ssid').value,
+        wifi_password: document.getElementById('cfg-wifi-pass').value,
+        server_base_url: document.getElementById('cfg-server-url').value,
+        relay_pin: document.getElementById('cfg-relay-pin').value,
+        gate_open_duration: document.getElementById('cfg-gate-duration').value,
+        pin_barrier: document.getElementById('cfg-pin-barrier').value,
+        pin_hall: document.getElementById('cfg-pin-hall').value,
+        pin_aux: document.getElementById('cfg-pin-aux').value,
+        rfid_rx_pin: document.getElementById('cfg-rfid-rx').value
+      };
+
+      fetch('/api/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      })
+      .then(res => res.json())
+      .then(data => {
+        showToast(data.message || 'Configurações salvas com sucesso!');
+      })
+      .catch(err => showToast('Erro ao salvar configurações'));
+    }
+
+    // Start Polling every 2 seconds
+    setInterval(updateStatus, 2000);
+    updateStatus();
+  </script>
+</body>
+</html>
