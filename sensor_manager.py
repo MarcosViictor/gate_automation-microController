@@ -12,7 +12,7 @@ class SensorManager:
     """
     Gerencia os 4 sensores da automação do portão:
     1. Sensor de Barreira (GPIO - PULL_UP. 0 = Veículo no caminho, 1 = Acesso livre)
-    2. Sensor Hall (GPIO - PULL_UP. 0 = Portão Fechado, 1 = Portão Aberto)
+    2. Sensor Hall (GPIO - PULL_UP. 0 = Portão Aberto, 1 = Portão Fechado)
     3. Sensor Auxiliar / Botoeira (GPIO - PULL_UP. 0 = Pressionado/Acionado)
     4. Leitor RFID (UART ou Simulação Web)
     """
@@ -84,7 +84,7 @@ class SensorManager:
         if not IS_MICROPYTHON or self.hall_pin is None:
             return "Fechado (Simulado)"
         val = self.hall_pin.value()
-        return "Fechado" if val == 0 else "Aberto"
+        return "Aberto" if val == 0 else "Fechado"
 
     def is_aux_pressed(self):
         """Retorna True se a botoeira/sensor auxiliar for acionado (0)."""

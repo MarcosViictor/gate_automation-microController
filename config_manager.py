@@ -3,8 +3,8 @@ import json
 CONFIG_FILE = "config.json"
 
 DEFAULT_CONFIG = {
-    "wifi_ssid": "",
-    "wifi_password": "",
+    "wifi_ssid": "Rede vivo 5g",
+    "wifi_password": "ANTONIO/17/1971",
     "server_base_url": "http://sitiobarreiras.app.br:55432",
     "auth_header": "sbs",
     "relay_pin": 18,
@@ -14,7 +14,10 @@ DEFAULT_CONFIG = {
     "pin_aux": 4,
     "rfid_uart_id": 0,
     "rfid_baudrate": 9600,
-    "rfid_rx_pin": 5
+    "rfid_rx_pin": 5,
+    "max_history_size": 100,
+    "max_outbox_size": 200,
+    "server_timeout": 4
 }
 
 class ConfigManager:
@@ -49,7 +52,7 @@ class ConfigManager:
         for k, v in new_data.items():
             if k in DEFAULT_CONFIG:
                 # Converte tipos numericos caso venham como string
-                if k in ["relay_pin", "gate_open_duration", "pin_barrier", "pin_hall", "pin_aux", "rfid_uart_id", "rfid_baudrate", "rfid_rx_pin"]:
+                if k in ["relay_pin", "gate_open_duration", "pin_barrier", "pin_hall", "pin_aux", "rfid_uart_id", "rfid_baudrate", "rfid_rx_pin", "max_history_size", "max_outbox_size", "server_timeout"]:
                     try:
                         self.config[k] = int(v)
                     except (ValueError, TypeError):
