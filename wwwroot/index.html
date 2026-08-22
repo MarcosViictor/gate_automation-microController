@@ -504,8 +504,13 @@
           </div>
 
           <div class="sensor-card">
-            <div class="sensor-title">4. Última Tag RFID</div>
-            <div id="badge-rfid" class="sensor-badge badge-blue">Nenhuma</div>
+            <div class="sensor-title">4. Última Tag — Entrada</div>
+            <div id="badge-rfid-entrada" class="sensor-badge badge-blue">Nenhuma</div>
+          </div>
+
+          <div class="sensor-card">
+            <div class="sensor-title">5. Última Tag — Saída</div>
+            <div id="badge-rfid-saida" class="sensor-badge badge-blue">Nenhuma</div>
           </div>
 
         </div>
@@ -636,8 +641,40 @@
                 <input type="number" id="cfg-pin-aux" class="form-control" value="4" required>
               </div>
               <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-rfid-rx">Pino RX UART RFID:</label>
-                <input type="number" id="cfg-rfid-rx" class="form-control" value="5" required>
+                <label for="cfg-in-rx">Leitor ENTRADA &mdash; pino RX:</label>
+                <input type="number" id="cfg-in-rx" class="form-control" value="5" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-out-rx">Leitor SAÍDA &mdash; pino RX:</label>
+                <input type="number" id="cfg-out-rx" class="form-control" value="1" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-baudrate">Baudrate dos leitores:</label>
+                <select id="cfg-baudrate" class="form-control">
+                  <option value="115200">115200</option>
+                  <option value="9600">9600</option>
+                </select>
+              </div>
+              <div class="form-group" style="margin-bottom:0; grid-column: 1 / -1;">
+                <label for="cal-tag">Calibrar leitura &mdash; código de uma tag já cadastrada:</label>
+                <div style="display:flex; gap:8px;">
+                  <input type="text" id="cal-tag" class="form-control" placeholder="ex.: E28011606000020C5E5A1234">
+                  <button type="button" class="btn" onclick="calibrar()">🎯 Calibrar</button>
+                </div>
+                <small style="opacity:.75">Aproxime a tag de um leitor, digite o código dela e clique.
+                Os cortes de cabeçalho e CRC são deduzidos e salvos.</small>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-tag-offset">Bytes de cabeçalho a cortar:</label>
+                <input type="number" id="cfg-tag-offset" class="form-control" value="0" min="0" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-tag-trim">Dígitos de CRC a cortar do fim:</label>
+                <input type="number" id="cfg-tag-trim" class="form-control" value="4" min="0" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-timeout">Timeout do servidor (s):</label>
+                <input type="number" id="cfg-timeout" class="form-control" value="1" min="1" required>
               </div>
             </div>
           </div>
@@ -716,11 +753,23 @@
           }
 
           // 4. RFID
-          const lastTag = data.sensors.rfid.last_tag;
-          setBadge('badge-rfid', lastTag, 'blue');
+          (data.readers || []).forEach(r => {
+            const el = 'badge-rfid-' + r.direction;
+            // Leitor que nao inicializou nao pode parecer "sem tag lida".
+            setBadge(el, r.ready ? r.last_tag : 'UART indisponivel', r.ready ? 'blue' : 'red');
+          });
 
           // Info boxes
-          document.getElementById('info-wifi-mode').textContent = data.wifi.mode + ' (' + (data.wifi.connected ? 'Conectado' : 'Desconectado') + ')';
+          // O estado da maquina diz mais que um booleano: 'associando' e
+          // 'aguardando' explicam por que ainda nao ha rede.
+          const ESTADO_WIFI = {
+            ocioso: 'Iniciando', associando: 'Associando à rede',
+            conectado: 'Conectado', aguardando: 'Rede fora — nova tentativa em breve',
+            ap: 'Modo AP — corrija a rede abaixo e salve'
+          };
+          const st = data.wifi.state || (data.wifi.connected ? 'conectado' : 'ocioso');
+          document.getElementById('info-wifi-mode').textContent =
+            data.wifi.mode + ' (' + (ESTADO_WIFI[st] || st) + ')';
           document.getElementById('info-wifi-ip').textContent = data.wifi.ip;
           document.getElementById('info-relay-pin').textContent = 'GPIO ' + data.relay.relay_pin;
           document.getElementById('info-relay-status').textContent = data.relay.last_status;
@@ -828,7 +877,12 @@
           document.getElementById('cfg-pin-barrier').value = cfg.pin_barrier || 2;
           document.getElementById('cfg-pin-hall').value = cfg.pin_hall || 3;
           document.getElementById('cfg-pin-aux').value = cfg.pin_aux || 4;
-          document.getElementById('cfg-rfid-rx').value = cfg.rfid_rx_pin || 5;
+          document.getElementById('cfg-in-rx').value = cfg.reader_in_rx != null ? cfg.reader_in_rx : 5;
+          document.getElementById('cfg-out-rx').value = cfg.reader_out_rx != null ? cfg.reader_out_rx : 1;
+          document.getElementById('cfg-baudrate').value = cfg.reader_baudrate || 115200;
+          document.getElementById('cfg-tag-offset').value = cfg.tag_offset != null ? cfg.tag_offset : 0;
+          document.getElementById('cfg-tag-trim').value = cfg.tag_trim != null ? cfg.tag_trim : 4;
+          document.getElementById('cfg-timeout').value = cfg.server_timeout || 1;
         })
         .catch(err => console.error('Erro ao carregar configuracoes:', err));
     }
@@ -844,7 +898,12 @@
         pin_barrier: document.getElementById('cfg-pin-barrier').value,
         pin_hall: document.getElementById('cfg-pin-hall').value,
         pin_aux: document.getElementById('cfg-pin-aux').value,
-        rfid_rx_pin: document.getElementById('cfg-rfid-rx').value
+        reader_in_rx: document.getElementById('cfg-in-rx').value,
+        reader_out_rx: document.getElementById('cfg-out-rx').value,
+        reader_baudrate: document.getElementById('cfg-baudrate').value,
+        tag_offset: document.getElementById('cfg-tag-offset').value,
+        tag_trim: document.getElementById('cfg-tag-trim').value,
+        server_timeout: document.getElementById('cfg-timeout').value
       };
 
       fetch('/api/config', {
@@ -857,6 +916,29 @@
         showToast(data.message || 'Configurações salvas com sucesso!');
       })
       .catch(err => showToast('Erro ao salvar configurações'));
+    }
+
+    function calibrar() {
+      const codigo = document.getElementById('cal-tag').value.trim();
+      if (!codigo) { showToast('Digite o código da tag cadastrada'); return; }
+      fetch('/api/calibrar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tag_code: codigo })
+      })
+      .then(res => res.json())
+      .then(d => {
+        if (d.success) {
+          // Reflete na tela os valores achados, para ficarem visiveis e editaveis.
+          document.getElementById('cfg-tag-offset').value = d.tag_offset;
+          document.getElementById('cfg-tag-trim').value = d.tag_trim;
+          showToast(d.message + ' (offset ' + d.tag_offset + ', CRC ' + d.tag_trim + ')');
+        } else {
+          showToast(d.error);
+          if (d.frames && d.frames.length) console.log('Frames lidos:', d.frames);
+        }
+      })
+      .catch(() => showToast('Erro ao calibrar'));
     }
 
     // Start Polling every 2 seconds

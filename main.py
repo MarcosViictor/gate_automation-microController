@@ -1,22 +1,14 @@
 import gc
 import json
+import os
 import time
 
-try:
-    import network
-except ImportError:
-    network = None
+import network
+from machine import Pin, UART
 
-try:
-    from machine import Pin, UART
-except ImportError:
-    Pin = None
-    UART = None
-
-try:
-    import _thread
-except ImportError:
-    _thread = None
+ticks_ms = time.ticks_ms
+ticks_diff = time.ticks_diff
+ticks_add = time.ticks_add
 
 try:
     import usocket as socket
@@ -38,894 +30,222 @@ except ImportError:
     StorageManager = None
 
 
+# Rota do SB Gatehouse (AccessController@store, routes/api.php).
+ACCESS_PATH = "/api/raspberry/access"
+
 DEFAULT_CONFIG = {
-    "wifi_ssid": "Rede vivo 5g",
-    "wifi_password": "ANTONIO/17/1971",
-    "server_base_url": "http://sitiobarreiras.app.br:55432",
-    "auth_header": "sbs",
+    "wifi_ssid": "",
+    "wifi_password": "",
+    # Espera do DHCP no boot. Curto demais faz o sistema cair em modo AP com a
+    # senha certa, so porque o roteador demorou a entregar o IP.
+    "wifi_timeout": 30,
+    # Backoff entre tentativas quando a rede esta fora: dobra ate o teto.
+    "wifi_retry_base_seconds": 5,
+    "wifi_retry_max_seconds": 60,
+    # IP do SB Gatehouse na LAN (docker expoe 8001). Sem DNS e sem saida externa.
+    "server_base_url": "http://192.168.0.100:8001",
+    "access_path": ACCESS_PATH,
+    "auth_header": "",
+    "server_timeout": 1,
     "relay_pin": 18,
     "gate_open_duration": 5,
     "pin_barrier": 2,
     "pin_hall": 3,
     "pin_aux": 4,
-    "rfid_uart_id": 0,
-    "rfid_baudrate": 9600,
-    "rfid_rx_pin": 5,
+    # Dois leitores. No RP2040 o GP5 e RX da UART1 e o GP1 e RX da UART0.
+    # So RX e configurado: os leitores transmitem sozinhos, e assim o GP4
+    # continua livre para o sensor auxiliar.
+    "reader_in_uart": 1,
+    "reader_in_rx": 5,
+    "reader_out_uart": 0,
+    "reader_out_rx": 1,
+    "reader_baudrate": 115200,
+    # Fim de frame por silencio: frames EPC sao binarios e nao tem terminador.
+    "frame_gap_ms": 30,
+    # Extracao do codigo (ver parse_tag_frame). tag_offset comeca em 0: o valor
+    # real depende do leitor e se calibra com tag_debug ligado.
+    "tag_offset": 0,
+    "tag_trim": 4,
+    "tag_offset_threshold": 20,
+    "tag_debug": 1,
+    # O leitor repete a tag enquanto o cartao esta proximo; ignora releituras.
+    "rfid_dedup_seconds": 2,
     "max_history_size": 100,
     "max_outbox_size": 200,
-    "server_timeout": 4,
+    # Porta do servidor web. Precisa casar com RASPBERRY_HOST no .env do gatehouse.
+    "web_port": 80,
+    # Segredo do POST /open vindo do gatehouse (RASPBERRY_SECRET). Vazio = sem auth.
+    "open_token": "",
 }
 
 CONFIG_FILE = "config.json"
-
-INDEX_HTML = """<!DOCTYPE html>
-<html lang="pt-BR">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Gate Automation - MicroControlador</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    :root {
-      --bg-primary: #0f172a;
-      --bg-card: rgba(30, 41, 59, 0.75);
-      --bg-card-hover: rgba(51, 65, 85, 0.85);
-      --text-main: #f8fafc;
-      --text-muted: #94a3b8;
-      --accent-blue: #38bdf8;
-      --accent-green: #22c55e;
-      --accent-red: #ef4444;
-      --accent-yellow: #eab308;
-      --border-color: rgba(255, 255, 255, 0.15);
-      --radius: 16px;
-      --shadow: 0 10px 40px -10px rgba(0, 0, 0, 0.5);
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      font-family: 'Inter', sans-serif;
-    }
-
-    body {
-      background: var(--bg-primary);
-      background-image: 
-        radial-gradient(circle at 15% 50%, rgba(56, 189, 248, 0.08), transparent 40%),
-        radial-gradient(circle at 85% 30%, rgba(34, 197, 94, 0.08), transparent 40%);
-      background-attachment: fixed;
-      color: var(--text-main);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 40px 20px;
-    }
-
-    .container {
-      width: 100%;
-      max-width: 960px;
-      animation: slideUp 0.6s ease-out;
-    }
-
-    @keyframes slideUp {
-      from { opacity: 0; transform: translateY(20px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    header {
-      text-align: center;
-      margin-bottom: 32px;
-    }
-
-    header h1 {
-      font-size: 2.2rem;
-      font-weight: 800;
-      letter-spacing: -0.5px;
-      background: linear-gradient(135deg, #38bdf8, #818cf8, #e879f9);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      margin-bottom: 8px;
-    }
-
-    header p {
-      color: var(--text-muted);
-      font-size: 1.05rem;
-      font-weight: 400;
-    }
-
-    /* Tabs Navigation */
-    .tabs {
-      display: flex;
-      gap: 12px;
-      background: rgba(15, 23, 42, 0.4);
-      padding: 8px;
-      border-radius: 20px;
-      border: 1px solid var(--border-color);
-      margin-bottom: 24px;
-      backdrop-filter: blur(10px);
-      -webkit-backdrop-filter: blur(10px);
-    }
-
-    .tab-btn {
-      flex: 1;
-      padding: 14px;
-      border: none;
-      background: transparent;
-      color: var(--text-muted);
-      font-size: 1rem;
-      font-weight: 600;
-      border-radius: 14px;
-      cursor: pointer;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-    }
-
-    .tab-btn.active {
-      background: rgba(56, 189, 248, 0.1);
-      color: var(--accent-blue);
-      border: 1px solid rgba(56, 189, 248, 0.2);
-      box-shadow: inset 0 0 20px rgba(56, 189, 248, 0.05);
-    }
-
-    .tab-btn:hover:not(.active) {
-      color: var(--text-main);
-      background: rgba(255, 255, 255, 0.05);
-      transform: translateY(-1px);
-    }
-
-    /* Tab Content Panels */
-    .tab-content {
-      display: none;
-      opacity: 0;
-      transform: translateY(10px);
-      transition: opacity 0.4s ease, transform 0.4s ease;
-    }
-
-    .tab-content.active {
-      display: block;
-      opacity: 1;
-      transform: translateY(0);
-      animation: fadeIn 0.4s ease forwards;
-    }
-
-    @keyframes fadeIn {
-      from { opacity: 0; transform: translateY(10px); }
-      to { opacity: 1; transform: translateY(0); }
-    }
-
-    /* Cards */
-    .card {
-      background: var(--bg-card);
-      backdrop-filter: blur(16px);
-      -webkit-backdrop-filter: blur(16px);
-      border: 1px solid var(--border-color);
-      border-radius: var(--radius);
-      padding: 24px 28px;
-      margin-bottom: 24px;
-      box-shadow: var(--shadow);
-      transition: transform 0.3s ease, box-shadow 0.3s ease;
-    }
-
-    .card:hover {
-      box-shadow: 0 12px 48px -12px rgba(0, 0, 0, 0.6);
-      border-color: rgba(255, 255, 255, 0.2);
-    }
-
-    .card h2 {
-      font-size: 1.25rem;
-      font-weight: 700;
-      margin-bottom: 20px;
-      color: var(--text-main);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      letter-spacing: -0.3px;
-    }
-    
-    .card h2 span {
-      font-size: 1.4rem;
-    }
-
-    /* Grid layout for sensors */
-    .sensor-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-      gap: 16px;
-      margin-bottom: 24px;
-    }
-
-    .sensor-card {
-      background: rgba(15, 23, 42, 0.6);
-      border: 1px solid rgba(255,255,255,0.05);
-      border-radius: 14px;
-      padding: 20px 16px;
-      text-align: center;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .sensor-card::before {
-      content: "";
-      position: absolute;
-      top: 0; left: 0; right: 0; height: 2px;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-      opacity: 0;
-      transition: opacity 0.3s;
-    }
-
-    .sensor-card:hover {
-      transform: translateY(-4px) scale(1.02);
-      border-color: rgba(255,255,255,0.15);
-      background: rgba(30, 41, 59, 0.8);
-      box-shadow: 0 10px 20px -10px rgba(0,0,0,0.5);
-    }
-    
-    .sensor-card:hover::before {
-      opacity: 1;
-    }
-
-    .sensor-title {
-      font-size: 0.9rem;
-      font-weight: 500;
-      color: var(--text-muted);
-      margin-bottom: 12px;
-    }
-
-    .sensor-badge {
-      display: inline-block;
-      padding: 8px 16px;
-      border-radius: 30px;
-      font-size: 0.9rem;
-      font-weight: 700;
-      letter-spacing: 0.3px;
-      text-transform: uppercase;
-      box-shadow: inset 0 0 10px rgba(0,0,0,0.2);
-    }
-
-    .badge-green { background: rgba(34, 197, 94, 0.15); color: #4ade80; border: 1px solid rgba(34, 197, 94, 0.3); text-shadow: 0 0 10px rgba(74, 222, 128, 0.3); }
-    .badge-red { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); text-shadow: 0 0 10px rgba(248, 113, 113, 0.3); }
-    .badge-yellow { background: rgba(234, 179, 8, 0.15); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); text-shadow: 0 0 10px rgba(250, 204, 21, 0.3); }
-    .badge-blue { background: rgba(56, 189, 248, 0.15); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); text-shadow: 0 0 10px rgba(125, 211, 252, 0.3); }
-
-    /* Action Buttons */
-    .btn {
-      width: 100%;
-      padding: 16px;
-      border: none;
-      border-radius: 12px;
-      background: linear-gradient(135deg, #0284c7, #2563eb);
-      color: #fff;
-      font-size: 1.05rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 4px 15px rgba(37, 99, 235, 0.3);
-      position: relative;
-      overflow: hidden;
-    }
-    
-    .btn::after {
-      content: "";
-      position: absolute;
-      top: 0; left: -100%; width: 50%; height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-      transform: skewX(-20deg);
-      transition: 0.5s;
-    }
-
-    .btn:hover::after {
-      left: 150%;
-    }
-
-    .btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 8px 20px rgba(37, 99, 235, 0.4);
-      background: linear-gradient(135deg, #0369a1, #1d4ed8);
-    }
-
-    .btn:active {
-      transform: translateY(1px);
-    }
-
-    .btn:disabled {
-      background: #334155;
-      color: #94a3b8;
-      cursor: not-allowed;
-      box-shadow: none;
-    }
-    
-    .btn:disabled::after {
-      display: none;
-    }
-
-    /* Forms */
-    .form-group {
-      margin-bottom: 20px;
-    }
-
-    .form-group label {
-      display: block;
-      font-size: 0.9rem;
-      color: var(--text-muted);
-      margin-bottom: 8px;
-      font-weight: 600;
-    }
-
-    .form-control {
-      width: 100%;
-      padding: 14px 16px;
-      background: rgba(15, 23, 42, 0.5);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 10px;
-      color: var(--text-main);
-      font-size: 1rem;
-      outline: none;
-      transition: all 0.3s ease;
-      box-shadow: inset 0 2px 4px rgba(0,0,0,0.1);
-    }
-
-    .form-control:focus {
-      border-color: var(--accent-blue);
-      background: rgba(15, 23, 42, 0.8);
-      box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.2), inset 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .form-control::placeholder {
-      color: rgba(148, 163, 184, 0.5);
-    }
-
-    .form-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 20px;
-    }
-
-    @media (max-width: 600px) {
-      .form-row { grid-template-columns: 1fr; }
-      .tabs { flex-direction: column; }
-    }
-
-    /* Table */
-    .table-responsive {
-      width: 100%;
-      overflow-x: auto;
-      border-radius: 10px;
-      border: 1px solid var(--border-color);
-      background: rgba(15, 23, 42, 0.4);
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      text-align: left;
-      font-size: 0.95rem;
-    }
-
-    th {
-      padding: 16px;
-      background: rgba(255, 255, 255, 0.03);
-      border-bottom: 1px solid var(--border-color);
-      color: var(--text-main);
-      font-weight: 700;
-      text-transform: uppercase;
-      font-size: 0.8rem;
-      letter-spacing: 0.5px;
-    }
-
-    td {
-      padding: 16px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      color: #cbd5e1;
-    }
-
-    tr:last-child td {
-      border-bottom: none;
-    }
-
-    tr {
-      transition: background 0.2s;
-    }
-
-    tr:hover td {
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    /* Toast Notification */
-    .toast {
-      position: fixed;
-      bottom: 30px;
-      right: 30px;
-      padding: 16px 24px;
-      border-radius: 12px;
-      background: rgba(30, 41, 59, 0.95);
-      backdrop-filter: blur(8px);
-      color: #fff;
-      border-left: 4px solid var(--accent-blue);
-      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
-      display: none;
-      z-index: 1000;
-      font-weight: 500;
-      animation: slideInRight 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-    }
-
-    @keyframes slideInRight {
-      from { opacity: 0; transform: translateX(50px); }
-      to { opacity: 1; transform: translateX(0); }
-    }
-    
-    
-    /* Config Sections */
-    .config-section {
-      background: rgba(15, 23, 42, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      padding: 24px;
-      margin-bottom: 20px;
-      transition: all 0.3s ease;
-    }
-    
-    .config-section:hover {
-      background: rgba(15, 23, 42, 0.6);
-      border-color: rgba(255, 255, 255, 0.1);
-      box-shadow: inset 0 2px 10px rgba(0,0,0,0.2);
-    }
-    
-    .config-section h3 {
-      font-size: 1.1rem;
-      color: var(--accent-blue);
-      margin-bottom: 20px;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.05);
-      padding-bottom: 12px;
-    }
-
-    /* Info text for Network & Relay */
-    .info-box {
-      background: rgba(15, 23, 42, 0.4);
-      padding: 16px;
-      border-radius: 10px;
-      border: 1px solid rgba(255,255,255,0.05);
-      display: flex;
-      flex-direction: column;
-      gap: 6px;
-      transition: all 0.3s;
-    }
-    
-    .info-box:hover {
-      background: rgba(15, 23, 42, 0.6);
-      border-color: rgba(255,255,255,0.1);
-    }
-    
-    .info-label {
-      color: var(--text-muted); 
-      font-size: 0.85rem;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      font-weight: 600;
-    }
-    
-    .info-value {
-      font-weight: 700;
-      font-size: 1.05rem;
-      color: var(--text-main);
-    }
-  </style>
-</head>
-<body>
-
-  <div class="container">
-    <header>
-      <h1>Gate Automation MicroController</h1>
-      <p id="system-status-subtitle">Carregando status do sistema...</p>
-    </header>
-
-    <!-- Navigation Tabs -->
-    <nav class="tabs">
-      <button class="tab-btn active" onclick="switchTab('status')">
-        <span>📊</span> Status & Sensores
-      </button>
-      <button class="tab-btn" onclick="switchTab('tags')">
-        <span>🏷️</span> Tags & Acesso
-      </button>
-      <button class="tab-btn" onclick="switchTab('config')">
-        <span>⚙️</span> Configurações
-      </button>
-    </nav>
-
-    <!-- TAB 1: Status & Sensores -->
-    <div id="tab-status" class="tab-content active">
-      <div class="card">
-        <h2><span>📡</span> Sensores em Tempo Real</h2>
-        <div class="sensor-grid">
-          
-          <div class="sensor-card">
-            <div class="sensor-title">1. Sensor de Barreira</div>
-            <div id="badge-barrier" class="sensor-badge badge-green">Acesso Livre</div>
-          </div>
-
-          <div class="sensor-card">
-            <div class="sensor-title">2. Sensor Hall (Portão)</div>
-            <div id="badge-hall" class="sensor-badge badge-blue">Fechado</div>
-          </div>
-
-          <div class="sensor-card">
-            <div class="sensor-title">3. Sensor Auxiliar</div>
-            <div id="badge-aux" class="sensor-badge badge-yellow">Em Espera</div>
-          </div>
-
-          <div class="sensor-card">
-            <div class="sensor-title">4. Última Tag RFID</div>
-            <div id="badge-rfid" class="sensor-badge badge-blue">Nenhuma</div>
-          </div>
-
-        </div>
-
-        <div style="margin-top: 10px;">
-          <button id="btn-trigger-gate" class="btn" onclick="triggerGate()">
-            <span>🚪</span> Acionar Abertura do Portão
-          </button>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2><span>ℹ️</span> Status de Rede & Relé</h2>
-        <div class="form-row">
-          <div class="info-box">
-            <span class="info-label">Conexão Wi-Fi</span>
-            <span id="info-wifi-mode" class="info-value">--</span>
-          </div>
-          <div class="info-box">
-            <span class="info-label">Endereço IP</span>
-            <span id="info-wifi-ip" class="info-value">--</span>
-          </div>
-          <div class="info-box">
-            <span class="info-label">Pino do Relé</span>
-            <span id="info-relay-pin" class="info-value">--</span>
-          </div>
-          <div class="info-box">
-            <span class="info-label">Última Ação do Relé</span>
-            <span id="info-relay-status" class="info-value">--</span>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- TAB 2: Tags & Acesso -->
-    <div id="tab-tags" class="tab-content">
-      <div class="card">
-        <h2><span>🔍</span> Teste Manual de Tag RFID</h2>
-        <form id="form-scan" onsubmit="handleManualScan(event)">
-          <div class="form-group">
-            <label for="input-test-tag">Código da Tag RFID:</label>
-            <div style="display: flex; gap: 10px;">
-              <input type="text" id="input-test-tag" class="form-control" placeholder="Ex: 01E28069150000401D63E8C9" required>
-              <button type="submit" class="btn" style="width: auto; padding: 0 20px;">Consultar</button>
-            </div>
-          </div>
-        </form>
-      </div>
-
-      <div class="card">
-        <h2><span>📋</span> Histórico de Leituras de Tags</h2>
-        <div class="table-responsive">
-          <table>
-            <thead>
-              <tr>
-                <th>Data/Hora</th>
-                <th>Código Tag</th>
-                <th>Autorização</th>
-                <th>Barreira</th>
-                <th>Resultado</th>
-              </tr>
-            </thead>
-            <tbody id="table-logs-body">
-              <tr>
-                <td colspan="5" style="text-align: center; color: var(--text-muted);">Nenhum histórico disponível.</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-
-    <!-- TAB 3: Configurações -->
-    <div id="tab-config" class="tab-content">
-      <div class="card">
-        <h2><span>⚙️</span> Configurações do Sistema</h2>
-        <form id="form-config" onsubmit="handleSaveConfig(event)">
-        
-          <div class="config-section">
-            <h3><span>📶</span> Rede Wi-Fi</h3>
-            <div class="form-row">
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-wifi-ssid">SSID do Wi-Fi:</label>
-                <input type="text" id="cfg-wifi-ssid" class="form-control" placeholder="Nome da rede sem fio">
-              </div>
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-wifi-pass">Senha do Wi-Fi:</label>
-                <input type="password" id="cfg-wifi-pass" class="form-control" placeholder="Senha da rede">
-              </div>
-            </div>
-          </div>
-
-          <div class="config-section">
-            <h3><span>🌐</span> Servidor API Local</h3>
-            <div class="form-group" style="margin-bottom:0;">
-              <label for="cfg-server-url">URL do Servidor Local (API):</label>
-              <input type="text" id="cfg-server-url" class="form-control" placeholder="http://sitiobarreiras.app.br:55432" required>
-            </div>
-          </div>
-
-          <div class="config-section">
-            <h3><span>🔌</span> Hardware e Sensores</h3>
-            <div class="form-row" style="margin-bottom: 16px;">
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-relay-pin">Pino GPIO do Relé:</label>
-                <input type="number" id="cfg-relay-pin" class="form-control" value="18" required>
-              </div>
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-gate-duration">Tempo Pulso Relé (segundos):</label>
-                <input type="number" id="cfg-gate-duration" class="form-control" value="5" required>
-              </div>
-            </div>
-            
-            <div class="form-row" style="margin-bottom: 16px;">
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-pin-barrier">Pino Sensor Barreira:</label>
-                <input type="number" id="cfg-pin-barrier" class="form-control" value="2" required>
-              </div>
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-pin-hall">Pino Sensor Hall:</label>
-                <input type="number" id="cfg-pin-hall" class="form-control" value="3" required>
-              </div>
-            </div>
-
-            <div class="form-row">
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-pin-aux">Pino Sensor Auxiliar/Botoeira:</label>
-                <input type="number" id="cfg-pin-aux" class="form-control" value="4" required>
-              </div>
-              <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-rfid-rx">Pino RX UART RFID:</label>
-                <input type="number" id="cfg-rfid-rx" class="form-control" value="5" required>
-              </div>
-            </div>
-          </div>
-
-          <div style="margin-top: 20px;">
-            <button type="submit" class="btn">💾 Salvar Configurações</button>
-          </div>
-
-        </form>
-      </div>
-    </div>
-
-  </div>
-
-  <div id="toast" class="toast"></div>
-
-  <script>
-    // Tab switching
-    function switchTab(tabId) {
-      document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
-      document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
-      
-      const selectedBtn = Array.from(document.querySelectorAll('.tab-btn')).find(b => b.getAttribute('onclick').includes(tabId));
-      if (selectedBtn) selectedBtn.classList.add('active');
-
-      const targetContent = document.getElementById('tab-' + tabId);
-      if (targetContent) targetContent.classList.add('active');
-
-      if (tabId === 'tags') fetchLogs();
-      if (tabId === 'config') fetchConfig();
-    }
-
-    function showToast(msg, duration = 3000) {
-      const t = document.getElementById('toast');
-      t.textContent = msg;
-      t.style.display = 'block';
-      setTimeout(() => { t.style.display = 'none'; }, duration);
-    }
-
-    // Secure DOM Update helpers
-    function setBadge(id, text, type) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.textContent = text;
-      el.className = 'sensor-badge badge-' + type;
-    }
-
-    function updateStatus() {
-      fetch('/api/status')
-        .then(res => res.json())
-        .then(data => {
-          // Subtitle
-          const sub = document.getElementById('system-status-subtitle');
-          if (sub) sub.textContent = 'IP: ' + (data.wifi.ip || '127.0.0.1') + ' (' + data.wifi.mode + ')';
-
-          // 1. Barrier
-          if (data.sensors.barrier.clear) {
-            setBadge('badge-barrier', 'Acesso Livre', 'green');
-          } else {
-            setBadge('badge-barrier', 'Veículo no Caminho', 'red');
-          }
-
-          // 2. Hall Sensor
-          const hallLabel = data.sensors.hall.label;
-          if (hallLabel === 'Fechado') {
-            setBadge('badge-hall', 'Portão Fechado', 'blue');
-          } else {
-            setBadge('badge-hall', 'Portão Aberto', 'yellow');
-          }
-
-          // 3. Aux Sensor
-          if (data.sensors.aux.pressed) {
-            setBadge('badge-aux', 'Pressionado', 'red');
-          } else {
-            setBadge('badge-aux', 'Em Espera', 'yellow');
-          }
-
-          // 4. RFID
-          const lastTag = data.sensors.rfid.last_tag;
-          setBadge('badge-rfid', lastTag, 'blue');
-
-          // Info boxes
-          document.getElementById('info-wifi-mode').textContent = data.wifi.mode + ' (' + (data.wifi.connected ? 'Conectado' : 'Desconectado') + ')';
-          document.getElementById('info-wifi-ip').textContent = data.wifi.ip;
-          document.getElementById('info-relay-pin').textContent = 'GPIO ' + data.relay.relay_pin;
-          document.getElementById('info-relay-status').textContent = data.relay.last_status;
-
-          const triggerBtn = document.getElementById('btn-trigger-gate');
-          if (triggerBtn) triggerBtn.disabled = data.relay.is_busy;
-        })
-        .catch(err => console.error('Erro ao atualizar status:', err));
-    }
-
-    function triggerGate() {
-      fetch('/api/trigger', { method: 'POST' })
-        .then(res => res.json())
-        .then(data => {
-          showToast(data.message || data.error);
-          updateStatus();
-        })
-        .catch(err => showToast('Erro ao enviar comando de abertura'));
-    }
-
-    function handleManualScan(e) {
-      e.preventDefault();
-      const input = document.getElementById('input-test-tag');
-      const code = input.value.trim();
-      if (!code) return;
-
-      fetch('/api/scan', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: code })
-      })
-      .then(res => res.json())
-      .then(data => {
-        showToast(data.reason || 'Tag processada');
-        input.value = '';
-        fetchLogs();
-      })
-      .catch(err => showToast('Erro ao testar tag'));
-    }
-
-    function fetchLogs() {
-      fetch('/api/tags')
-        .then(res => res.json())
-        .then(logs => {
-          const tbody = document.getElementById('table-logs-body');
-          tbody.replaceChildren(); // Safe clear
-
-          if (!logs || logs.length === 0) {
-            const tr = document.createElement('tr');
-            const td = document.createElement('td');
-            td.colSpan = 5;
-            td.style.textAlign = 'center';
-            td.style.color = 'var(--text-muted)';
-            td.textContent = 'Nenhum histórico disponível.';
-            tr.appendChild(td);
-            tbody.appendChild(tr);
-            return;
-          }
-
-          logs.forEach(log => {
-            const tr = document.createElement('tr');
-
-            const tdTime = document.createElement('td');
-            tdTime.textContent = new Date(log.timestamp * 1000).toLocaleTimeString();
-            tr.appendChild(tdTime);
-
-            const tdCode = document.createElement('td');
-            tdCode.style.fontWeight = '600';
-            tdCode.textContent = log.tag_code;
-            tr.appendChild(tdCode);
-
-            const tdAuth = document.createElement('td');
-            const spanAuth = document.createElement('span');
-            spanAuth.className = log.authorized ? 'sensor-badge badge-green' : 'sensor-badge badge-red';
-            spanAuth.textContent = log.authorized ? 'Autorizada' : 'Negada';
-            tdAuth.appendChild(spanAuth);
-            tr.appendChild(tdAuth);
-
-            const tdBarrier = document.createElement('td');
-            const spanBarrier = document.createElement('span');
-            spanBarrier.className = log.barrier_clear ? 'sensor-badge badge-green' : 'sensor-badge badge-red';
-            spanBarrier.textContent = log.barrier_clear ? 'Livre' : 'Obstruído';
-            tdBarrier.appendChild(spanBarrier);
-            tr.appendChild(tdBarrier);
-
-            const tdReason = document.createElement('td');
-            tdReason.textContent = log.reason;
-            tr.appendChild(tdReason);
-
-            tbody.appendChild(tr);
-          });
-        })
-        .catch(err => console.error('Erro ao buscar historico:', err));
-    }
-
-    function fetchConfig() {
-      fetch('/api/config')
-        .then(res => res.json())
-        .then(cfg => {
-          document.getElementById('cfg-wifi-ssid').value = cfg.wifi_ssid || '';
-          document.getElementById('cfg-wifi-pass').value = cfg.wifi_password || '';
-          document.getElementById('cfg-server-url').value = cfg.server_base_url || '';
-          document.getElementById('cfg-relay-pin').value = cfg.relay_pin || 18;
-          document.getElementById('cfg-gate-duration').value = cfg.gate_open_duration || 5;
-          document.getElementById('cfg-pin-barrier').value = cfg.pin_barrier || 2;
-          document.getElementById('cfg-pin-hall').value = cfg.pin_hall || 3;
-          document.getElementById('cfg-pin-aux').value = cfg.pin_aux || 4;
-          document.getElementById('cfg-rfid-rx').value = cfg.rfid_rx_pin || 5;
-        })
-        .catch(err => console.error('Erro ao carregar configuracoes:', err));
-    }
-
-    function handleSaveConfig(e) {
-      e.preventDefault();
-      const payload = {
-        wifi_ssid: document.getElementById('cfg-wifi-ssid').value,
-        wifi_password: document.getElementById('cfg-wifi-pass').value,
-        server_base_url: document.getElementById('cfg-server-url').value,
-        relay_pin: document.getElementById('cfg-relay-pin').value,
-        gate_open_duration: document.getElementById('cfg-gate-duration').value,
-        pin_barrier: document.getElementById('cfg-pin-barrier').value,
-        pin_hall: document.getElementById('cfg-pin-hall').value,
-        pin_aux: document.getElementById('cfg-pin-aux').value,
-        rfid_rx_pin: document.getElementById('cfg-rfid-rx').value
-      };
-
-      fetch('/api/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      })
-      .then(res => res.json())
-      .then(data => {
-        showToast(data.message || 'Configurações salvas com sucesso!');
-      })
-      .catch(err => showToast('Erro ao salvar configurações'));
-    }
-
-    // Start Polling every 2 seconds
-    setInterval(updateStatus, 2000);
-    updateStatus();
-  </script>
-</body>
-</html>
-"""
+INDEX_FILE = "wwwroot/index.html"
+
+# Pagina minima servida quando wwwroot/index.html nao esta no dispositivo.
+# Curta de proposito: fica residente na RAM, ao contrario da UI real.
+FALLBACK_HTML = (
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<title>Gate Automation</title></head><body style='font-family:sans-serif;padding:2em'>"
+    "<h2>Sistema no ar, interface ausente</h2>"
+    "<p>O firmware respondeu, mas <code>wwwroot/index.html</code> nao esta no dispositivo.</p>"
+    "<p>Envie a pasta inteira:<br><code>mpremote connect &lt;porta&gt; fs cp -r wwwroot :</code></p>"
+    "<p>A API continua funcionando: <a href='/api/status'>/api/status</a> | "
+    "<a href='/health'>/health</a></p></body></html>"
+)
+
+def parse_tag_frame(data, offset=0, trim=4, offset_threshold=20):
+    """
+    Extrai o codigo da tag de um frame bruto do leitor.
+
+    Mesma regra do read_tag.py usado no cadastro: sem isso o codigo lido no
+    portao nao bate com o gravado no SBS, que compara a string exata.
+
+    Passos: hex -> descarta padding 00 do fim -> corta o cabecalho quando o
+    frame passa do limiar -> junta -> descarta os digitos finais de CRC.
+    """
+    hex_list = ["%02X" % b for b in data]
+
+    while hex_list and hex_list[-1] == "00":
+        hex_list.pop()
+    if not hex_list:
+        return None
+
+    # Frames curtos nao tem cabecalho para cortar; cortar apagaria a tag.
+    if len(hex_list) > offset_threshold:
+        hex_list = hex_list[offset:]
+
+    texto = "".join(hex_list)
+    if trim and len(texto) > trim:
+        texto = texto[:-trim]
+    return texto or None
+
+
+def calibrar_offset_trim(frame, codigo_esperado, limiar=20):
+    """
+    Descobre tag_offset/tag_trim que fazem parse_tag_frame devolver o codigo
+    esperado, ou None se nenhum par servir.
+
+    Tira o chute da calibracao: em vez de ajustar numeros no escuro, le-se uma
+    tag ja cadastrada, informa-se o codigo dela e os cortes saem por busca.
+
+    Devolve tambem o limiar, porque parse_tag_frame so aplica o offset em
+    frames longos — num frame curto o corte nunca valeria e a busca falharia
+    sem explicacao. Nesse caso a segunda passada zera o limiar.
+    """
+    esperado = str(codigo_esperado).strip().upper()
+    if not frame or not esperado:
+        return None
+
+    for tentativa in (limiar, 0):
+        for offset in range(0, len(frame) + 1):
+            for trim in range(0, 17):
+                if parse_tag_frame(frame, offset=offset, trim=trim,
+                                   offset_threshold=tentativa) == esperado:
+                    return {"tag_offset": offset, "tag_trim": trim,
+                            "tag_offset_threshold": tentativa}
+    return None
+
+
+class TagReader:
+    """
+    Um leitor RFID: uma UART, um sentido, seu proprio buffer e dedup.
+
+    Frames EPC sao binarios e nao tem terminador, entao o fim do frame e
+    detectado por silencio: passados frame_gap_ms sem chegar byte, o que
+    estiver no buffer e um frame completo.
+    """
+
+    MAX_FRAME = 128
+
+    def __init__(self, config_manager, uart_id, rx_pin, direction):
+        self.config = config_manager
+        self.uart_id = uart_id
+        self.rx_pin = rx_pin
+        self.direction = direction
+        self.uart = None
+        self.last_tag = None
+        self.last_tag_time = 0
+        self._last_tag_ticks = -999999
+        self._buf = b""
+        self._last_byte_ticks = 0
+        self.last_frame = b""  # ultimo frame bruto, base da calibracao
+        self.setup()
+
+    def setup(self):
+        baudrate = self.config.get("reader_baudrate", 115200)
+        try:
+            self.uart = UART(self.uart_id, baudrate=baudrate,
+                             rx=Pin(self.rx_pin), timeout=10)
+            print("[LEITOR %s] UART%d RX GP%d a %d bps"
+                  % (self.direction, self.uart_id, self.rx_pin, baudrate))
+        except Exception as exc:
+            print("[LEITOR %s] NAO inicializou:" % self.direction, exc)
+            self.uart = None
+
+    def poll(self):
+        """Devolve um codigo de tag novo, ou None. Nunca bloqueia."""
+        if self.uart is None:
+            return None
+        try:
+            if self.uart.any():
+                data = self.uart.read()
+                if data:
+                    self._buf += data
+                    self._last_byte_ticks = ticks_ms()
+                    if len(self._buf) > self.MAX_FRAME:
+                        self._buf = self._buf[-self.MAX_FRAME:]
+                    return None  # ainda pode vir mais desta rajada
+
+            if not self._buf:
+                return None
+            if ticks_diff(ticks_ms(), self._last_byte_ticks) < self.config.get("frame_gap_ms", 30):
+                return None
+
+            frame = self._buf
+            self._buf = b""
+            return self._handle_frame(frame)
+        except Exception as exc:
+            print("[LEITOR %s] erro de leitura:" % self.direction, exc)
+            self._buf = b""
+            return None
+
+    def _handle_frame(self, frame):
+        self.last_frame = frame
+        codigo = parse_tag_frame(
+            frame,
+            offset=self.config.get("tag_offset", 0),
+            trim=self.config.get("tag_trim", 4),
+            offset_threshold=self.config.get("tag_offset_threshold", 20),
+        )
+        if self.config.get("tag_debug", 0):
+            # Como calibrar tag_offset/tag_trim: o valor certo depende do
+            # leitor e so aparece comparando o HEX bruto com uma tag conhecida.
+            print("[LEITOR %s] HEX %s -> codigo %s"
+                  % (self.direction, "".join(["%02X" % b for b in frame]), codigo))
+        if not codigo:
+            return None
+        return self._accept(codigo)
+
+    def _accept(self, codigo):
+        """Ignora releituras do mesmo cartao dentro da janela de dedup."""
+        agora = ticks_ms()
+        janela = int(self.config.get("rfid_dedup_seconds", 2)) * 1000
+        if codigo == self.last_tag and ticks_diff(agora, self._last_tag_ticks) < janela:
+            return None
+        self.last_tag = codigo
+        self._last_tag_ticks = agora
+        self.last_tag_time = time.time()
+        return codigo
+
+    def get_status(self):
+        return {
+            "direction": self.direction,
+            "uart": self.uart_id,
+            "rx_pin": self.rx_pin,
+            "ready": self.uart is not None,
+            "last_tag": self.last_tag if self.last_tag else "Nenhuma",
+            "timestamp": self.last_tag_time,
+        }
 
 
 class ConfigManager:
@@ -959,11 +279,13 @@ class ConfigManager:
         return self.config.get(key, default)
 
     def update(self, new_data):
-        numeric_keys = {"relay_pin", "gate_open_duration", "pin_barrier", "pin_hall", "pin_aux", "rfid_uart_id", "rfid_baudrate", "rfid_rx_pin"}
         for key, value in new_data.items():
             if key not in DEFAULT_CONFIG:
                 continue
-            if key in numeric_keys:
+            # O tipo do default manda na coercao: nenhum campo numerico novo
+            # vira string por ter sido esquecido numa lista a parte.
+            default = DEFAULT_CONFIG[key]
+            if isinstance(default, int):
                 try:
                     self.config[key] = int(value)
                 except (TypeError, ValueError):
@@ -973,57 +295,196 @@ class ConfigManager:
         return self.save()
 
 
+# Codigos de network.WLAN.status() no port rp2 (driver CYW43).
+# Os negativos sao TERMINAIS: esperar mais nao muda o resultado.
+# 1 e 2 sao progresso — e o 2 (associado, DHCP pendente) e o que estoura
+# timeout curto em rede lenta, parecendo falha de credencial sem ser.
+WLAN_STATUS = {
+    0: "desconectado",
+    1: "associando a rede",
+    2: "associado - aguardando IP do DHCP",
+    3: "conectado (IP obtido)",
+    -1: "falha na conexao",
+    -2: "rede nao encontrada",
+    -3: "senha incorreta",
+}
+WLAN_TERMINAL = (-1, -2, -3)
+
+WIFI_OCIOSO = "ocioso"
+WIFI_ASSOCIANDO = "associando"
+WIFI_CONECTADO = "conectado"
+WIFI_AGUARDANDO = "aguardando"
+WIFI_AP = "ap"
+
+
 class WifiManager:
+
+
     def __init__(self, config_manager):
         self.config = config_manager
-        self.is_connected = False
-        self.ip_address = "127.0.0.1"
+        self.ip_address = "0.0.0.0"
         self.mode = "STA"
+        self.state = WIFI_OCIOSO
+        self.wlan = None
+        self._deadline = 0
+        self._backoff = 0
+        self._last_code = None
+
+    @property
+    def is_connected(self):
+        """
+        Estado real do radio, nao o resultado do ultimo connect().
+
+        Como atributo simples, isto ficava True para sempre: uma queda de rede
+        depois do boot passava despercebida e o modo AP se declarava conectado.
+        """
+        if self.wlan is None:
+            return False
+        try:
+            if self.mode == "AP":
+                return bool(self.wlan.active())
+            return bool(self.wlan.isconnected())
+        except Exception:
+            return False
+
+    # --- entrada publica ---
 
     def connect(self):
-        if network is None:
-            print("[MOCK] WifiManager em modo de simulação")
-            self.is_connected = True
-            self.ip_address = "127.0.0.1"
-            return True
+        """Inicia a associacao e volta na hora. Nao promete sucesso."""
+        self._iniciar_sta()
 
+    def tick(self):
+        """Uma transicao por volta do loop principal."""
+        if self.state == WIFI_ASSOCIANDO:
+            self._em_associando()
+        elif self.state == WIFI_CONECTADO:
+            self._em_conectado()
+        elif self.state == WIFI_AGUARDANDO:
+            self._em_aguardando()
+        elif self.state == WIFI_OCIOSO:
+            self._iniciar_sta()
+        # WIFI_AP e terminal: so reconfigurado() sai dele.
+
+    def reconfigurado(self):
+        """
+        Credenciais mudaram na tela: tenta de novo agora.
+
+        Sem isto o operador corrigiria a senha pelo proprio AP e ainda
+        precisaria reiniciar na mao — o modo AP nao serviria para nada.
+        """
+        self._backoff = 0
+        self._iniciar_sta()
+
+    # --- transicoes ---
+
+    def _iniciar_sta(self):
         ssid = self.config.get("wifi_ssid", "").strip()
-        password = self.config.get("wifi_password", "").strip()
-        wlan = network.WLAN(network.STA_IF)
-        wlan.active(True)
+        if not ssid:
+            print("[WIFI] Nenhum SSID configurado.")
+            self.start_ap()
+            return
 
-        if ssid:
-            print("Tentando conectar a rede Wi-Fi:", ssid)
-            wlan.connect(ssid, password)
-            attempts = 0
-            while not wlan.isconnected() and attempts < 10:
-                time.sleep(1)
-                attempts += 1
-            if wlan.isconnected():
-                self.is_connected = True
-                self.ip_address = wlan.ifconfig()[0]
-                self.mode = "STA"
-                print("Conectado com sucesso ao Wi-Fi! IP:", self.ip_address)
-                return True
+        if self.mode == "AP" and self.wlan is not None:
+            try:
+                self.wlan.active(False)  # desliga o AP antes de voltar para STA
+            except Exception:
+                pass
 
-        print("Iniciando modo AP para configuração...")
-        self.start_ap()
-        return False
+        self.mode = "STA"
+        self.wlan = network.WLAN(network.STA_IF)
+        self.wlan.active(True)
+        print("Tentando conectar a rede Wi-Fi:", ssid)
+        try:
+            self.wlan.connect(ssid, self.config.get("wifi_password", "").strip())
+        except Exception as exc:
+            print("[WIFI] Erro ao iniciar conexao:", exc)
+
+        self._last_code = None
+        self.state = WIFI_ASSOCIANDO
+        self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
+
+    def _em_associando(self):
+        if self.is_connected:
+            self._virar_conectado()
+            return
+
+        code = self._codigo()
+        if code != self._last_code:
+            print("[WIFI]  ...", self._status_text(code))
+            self._last_code = code
+
+        # Codigo terminal: nenhuma espera resolve senha errada ou rede ausente.
+        if code in WLAN_TERMINAL:
+            print("[WIFI] Erro de configuracao:", self._status_text(code))
+            self.start_ap()
+            return
+
+        if ticks_diff(ticks_ms(), self._deadline) >= 0:
+            print("[WIFI] Rede indisponivel no momento.")
+            self._virar_aguardando()
+
+    def _em_conectado(self):
+        if self.is_connected:
+            return
+        print("[WIFI] Conexao caiu.")
+        self._virar_aguardando()
+
+    def _em_aguardando(self):
+        if ticks_diff(ticks_ms(), self._deadline) >= 0:
+            self._iniciar_sta()
+
+    def _virar_conectado(self):
+        self.state = WIFI_CONECTADO
+        self._backoff = 0
+        cfg = self.wlan.ifconfig()
+        self.ip_address = cfg[0]
+        print("Conectado ao Wi-Fi! Acesse http://%s:%s"
+              % (self.ip_address, self.config.get("web_port", 80)))
+        print("[WIFI] gateway", cfg[2], "| mascara", cfg[1], "| DNS", cfg[3])
+
+    def _virar_aguardando(self):
+        base = int(self.config.get("wifi_retry_base_seconds", 5))
+        teto = int(self.config.get("wifi_retry_max_seconds", 60))
+        self._backoff = base if not self._backoff else min(self._backoff * 2, teto)
+        self.state = WIFI_AGUARDANDO
+        self._deadline = ticks_add(ticks_ms(), self._backoff * 1000)
+        print("[WIFI] Nova tentativa em", self._backoff, "s")
+
+    # --- apoio ---
+
+    def _codigo(self):
+        try:
+            return self.wlan.status()
+        except Exception:
+            return None
+
+    def _status_text(self, code=None):
+        """Traduz o codigo. Recebe o valor ja lido para nao reler o radio e
+        acabar reportando um estado diferente do que a logica avaliou."""
+        if code is None:
+            code = self._codigo()
+        if code is None:
+            return "desconhecido"
+        return "%s (%s)" % (WLAN_STATUS.get(code, "codigo %s" % code), code)
 
     def start_ap(self, ap_ssid="GateAutomation-AP", ap_password=""):
-        if network is None:
-            return
         ap = network.WLAN(network.AP_IF)
         ap.active(True)
-        ap.config(essid=ap_ssid, password=ap_password)
-        self.is_connected = True
-        self.ip_address = ap.ifconfig()[0]
+        try:
+            ap.config(essid=ap_ssid, password=ap_password)
+        except Exception as exc:
+            print("[WIFI] Erro ao configurar AP:", exc)
+        self.wlan = ap
         self.mode = "AP"
+        self.state = WIFI_AP
+        self.ip_address = ap.ifconfig()[0]
         print("Modo AP ativado! Conecte-se em", ap_ssid, "- IP:", self.ip_address)
+        print("[WIFI] Corrija a rede na tela; ao salvar, ele tenta de novo sozinho.")
 
     def get_status(self):
         return {
             "connected": self.is_connected,
+            "state": self.state,
             "ip": self.ip_address,
             "mode": self.mode,
             "ssid": self.config.get("wifi_ssid", ""),
@@ -1036,16 +497,9 @@ class SensorManager:
         self.barrier_pin = None
         self.hall_pin = None
         self.aux_pin = None
-        self.uart = None
-        self.last_tag = None
-        self.last_tag_time = 0
         self.setup_hardware()
 
     def setup_hardware(self):
-        if Pin is None or UART is None:
-            print("[MOCK] SensorManager em modo de simulação")
-            return
-
         pin_b = self.config.get("pin_barrier", 2)
         pin_h = self.config.get("pin_hall", 3)
         pin_a = self.config.get("pin_aux", 4)
@@ -1068,28 +522,20 @@ class SensorManager:
         except Exception as exc:
             print("Erro ao configurar pino auxiliar:", exc)
 
-        try:
-            uart_id = self.config.get("rfid_uart_id", 0)
-            baudrate = self.config.get("rfid_baudrate", 9600)
-            rx_pin = self.config.get("rfid_rx_pin", 5)
-            self.uart = UART(uart_id, baudrate=baudrate, rx=Pin(rx_pin))
-            print("UART RFID configurada em", uart_id, "baud", baudrate, "RX", rx_pin)
-        except Exception as exc:
-            print("Aviso: UART RFID não inicializada:", exc)
 
     def is_barrier_clear(self):
-        if Pin is None or self.barrier_pin is None:
+        if self.barrier_pin is None:
             return True
         return self.barrier_pin.value() == 1
 
     def get_barrier_status(self):
-        if Pin is None or self.barrier_pin is None:
-            return "Acesso livre (Simulado)"
+        if self.barrier_pin is None:
+            return "Barreira indisponivel"
         return "Veículo no caminho" if self.barrier_pin.value() == 0 else "Acesso livre"
 
     def get_hall_status(self):
-        if Pin is None or self.hall_pin is None:
-            return "Fechado (Simulado)"
+        if self.hall_pin is None:
+            return "Hall indisponivel"
         return "Aberto" if self.hall_pin.value() == 0 else "Fechado"
 
     def is_aux_pressed(self):
@@ -1098,32 +544,24 @@ class SensorManager:
     def get_aux_status(self):
         return "Desativada"
 
-    def poll_rfid(self):
-        if Pin is None or self.uart is None:
-            return None
-        try:
-            if self.uart.any():
-                data = self.uart.read()
-                if data:
-                    raw_str = data.decode("utf-8", "ignore").strip()
-                    if raw_str:
-                        self.last_tag = raw_str
-                        self.last_tag_time = time.time()
-                        return raw_str
-        except Exception as exc:
-            print("Erro ao ler UART RFID:", exc)
-        return None
-
     def get_all_status(self):
         return {
             "barrier": {"clear": self.is_barrier_clear(), "label": self.get_barrier_status()},
             "hall": {"label": self.get_hall_status(), "is_closed": self.get_hall_status() == "Fechado"},
             "aux": {"pressed": self.is_aux_pressed(), "label": self.get_aux_status()},
-            "rfid": {"last_tag": self.last_tag if self.last_tag else "Nenhuma", "timestamp": self.last_tag_time},
         }
 
 
 class GateRelay:
+    """
+    Aciona o rele com pulso NAO bloqueante.
+
+    O fechamento e agendado por deadline e conferido pelo loop principal em
+    update(). Nao usa _thread: no Pico W o driver CYW43 do Wi-Fi nao e seguro
+    entre os dois cores, e um time.sleep(5) no core principal congelaria o
+    servidor web e a leitura de RFID durante toda a abertura.
+    """
+
     def __init__(self, config_manager, sensor_manager=None):
         self.config = config_manager
         self.sensor_manager = sensor_manager
@@ -1131,75 +569,65 @@ class GateRelay:
         self.last_action_time = 0
         self.last_action_status = "Pronto"
         self.trigger_count = 0
+        self._close_at = None
         self.setup_gpio()
 
     def setup_gpio(self):
-        if Pin is None:
-            print("[MOCK] GateRelay em modo de simulação")
-            return
         pin_num = self.config.get("relay_pin", 18)
         try:
-            Pin(pin_num, Pin.IN)
-            print("GPIO do relé configurado no pino", pin_num)
+            Pin(pin_num, Pin.IN)  # repouso em alta impedancia
+            print("GPIO do rele configurado no pino", pin_num)
         except Exception as exc:
-            print("Erro ao configurar GPIO do relé:", exc)
+            print("Erro ao configurar GPIO do rele:", exc)
 
     def trigger_open(self, duration=None, ignore_barrier=False):
         if self.is_busy:
-            return False, "Portão já está em processo de abertura"
+            return False, "Portao ja esta em processo de abertura"
 
         if not ignore_barrier and self.sensor_manager and not self.sensor_manager.is_barrier_clear():
-            self.last_action_status = "Bloqueado: veículo no caminho"
-            print("[SEGURANÇA] Abertura bloqueada: veículo no caminho")
+            self.last_action_status = "Bloqueado: veiculo no caminho"
+            print("[SEGURANCA] Abertura bloqueada: veiculo no caminho")
             return False, "Bloqueado pelo sensor de barreira"
 
         if duration is None:
             duration = self.config.get("gate_open_duration", 5)
 
-        self.is_busy = True
-        self.last_action_status = "Abrindo portão..."
-        self.trigger_count += 1
-
-        if Pin is None:
-            print("[MOCK] Portão aberto por", duration, "segundos")
-            self._pulse_mock(duration)
-        else:
-            if _thread is not None:
-                try:
-                    _thread.start_new_thread(self._pulse_thread, (duration,))
-                except Exception as exc:
-                    print("Erro ao iniciar thread do relé, executando direto:", exc)
-                    self._pulse_sync(duration)
-            else:
-                self._pulse_sync(duration)
-
-        return True, "Acionamento do portão iniciado"
-
-    def _pulse_sync(self, duration):
         pin_num = self.config.get("relay_pin", 18)
         try:
             relay = Pin(pin_num, Pin.OUT)
             relay.value(0)
-            print("Portão ABERTO - sinal LOW no pino", pin_num)
-            time.sleep(duration)
-            Pin(pin_num, Pin.IN)
-            print("Portão FECHADO - alta impedância no pino", pin_num)
-            self.last_action_status = "Portão acionado com sucesso"
+            print("Portao ABERTO - sinal LOW no pino", pin_num)
         except Exception as exc:
-            print("Erro no acionamento do relé:", exc)
-            self.last_action_status = "Erro no relé: " + str(exc)
-        finally:
-            self.is_busy = False
+            print("Erro no acionamento do rele:", exc)
+            self.last_action_status = "Erro no rele: " + str(exc)
+            return False, "Erro no rele: " + str(exc)
 
-    def _pulse_thread(self, duration):
-        self._pulse_sync(duration)
+        self.is_busy = True
+        self.trigger_count += 1
+        self.last_action_time = time.time()
+        self.last_action_status = "Abrindo portao..."
+        self._close_at = ticks_add(ticks_ms(), int(duration * 1000))
+        return True, "Acionamento do portao iniciado"
 
-    def _pulse_mock(self, duration):
+    def update(self):
+        """Fecha o portao quando o pulso expira. Chamado a cada volta do loop."""
+        if not self.is_busy or self._close_at is None:
+            return
+        if ticks_diff(self._close_at, ticks_ms()) > 0:
+            return
+        self._close()
+
+    def _close(self):
+        pin_num = self.config.get("relay_pin", 18)
         try:
-            time.sleep(duration)
-            print("[MOCK] Portão fechado")
-            self.last_action_status = "Portão acionado com sucesso (Simulado)"
+            Pin(pin_num, Pin.IN)  # volta para alta impedancia
+            print("Portao FECHADO - alta impedancia no pino", pin_num)
+            self.last_action_status = "Portao acionado com sucesso"
+        except Exception as exc:
+            print("Erro ao fechar o rele:", exc)
+            self.last_action_status = "Erro no rele: " + str(exc)
         finally:
+            self._close_at = None
             self.is_busy = False
 
     def get_status(self):
@@ -1212,73 +640,101 @@ class GateRelay:
 
 
 class ServerClient:
+    """
+    Cliente HTTP do SB Gatehouse.
+
+    Contrato (AccessController@store):
+        POST {base}/api/raspberry/access   {"tag_code": "..."}
+        -> 200 {"decision": "allowed"|"denied", "open": bool, "reason"?: str}
+
+    ATENCAO: 200 NAO significa autorizado. A decisao vem no corpo, em "open".
+    """
+
     def __init__(self, config_manager):
         self.config = config_manager
 
-    def check_tag(self, tag_code):
-        base_url = self.config.get("server_base_url", "http://sitiobarreiras.app.br:55432").rstrip("/")
-        auth_header = self.config.get("auth_header", "sbs")
-        timeout_sec = self.config.get("server_timeout", 4)
-        url = base_url + "/api/gate/check"
-        headers = {"Authorization": auth_header, "Content-Type": "application/json"}
-        payload = {"code": str(tag_code).strip()}
+    def _endpoint(self):
+        base = self.config.get("server_base_url", DEFAULT_CONFIG["server_base_url"])
+        return base.rstrip("/") + self.config.get("access_path", ACCESS_PATH)
 
+    def _post(self, payload):
+        """Envia o payload e devolve (status_code, corpo_json). (0, None) em falha."""
         if requests is None:
-            print("[SERVER_CLIENT] Sem cliente HTTP. Tratando como erro de servidor.")
-            return False, {"status": 0, "mode": "no_http"}, "server_error"
+            print("[SERVER] Sem cliente HTTP disponivel.")
+            return 0, None
 
+        headers = {"Content-Type": "application/json"}
+        auth = self.config.get("auth_header", "")
+        if auth:
+            headers["Authorization"] = auth
+
+        res = None
         try:
-            print(f"[SERVER_CLIENT] Enviando requisição: {url} (Tag: {tag_code})")
-            res = requests.post(url, json=payload, headers=headers, timeout=timeout_sec)
-            status_code = res.status_code
-            response_data = {}
+            res = requests.post(
+                self._endpoint(),
+                json=payload,
+                headers=headers,
+                timeout=self.config.get("server_timeout", 1),
+            )
+            status = res.status_code
             try:
-                response_data = res.json()
+                body = res.json()
             except Exception:
-                response_data = {"raw_text": res.text}
-            res.close()
-
-            if status_code == 200:
-                print(f"[SERVER_CLIENT] Servidor autorizou tag: {tag_code}")
-                return True, {"status": 200, "mode": "online", "data": response_data}, "online_success"
-            elif 400 <= status_code < 500:
-                print(f"[SERVER_CLIENT] Servidor RECUSOU tag (Status {status_code}): {tag_code}")
-                return False, {"status": status_code, "mode": "online", "data": response_data}, "online_denied"
-            else:
-                print(f"[SERVER_CLIENT] Erro de Servidor (Status {status_code}): {tag_code}")
-                return False, {"status": status_code, "mode": "server_error", "data": response_data}, "server_error"
-
+                body = None
+            return status, body
         except Exception as exc:
-            print("[SERVER_CLIENT] Excecao ao comunicar com servidor:", exc)
-            return False, {"status": 500, "mode": "error", "error": str(exc)}, "server_error"
+            print("[SERVER] Falha na requisicao:", exc)
+            return 0, None
+        finally:
+            # urequests so devolve o socket no close(); sem isso o Pico vaza socket
+            # a cada tag e para de conseguir abrir conexoes.
+            if res is not None:
+                try:
+                    res.close()
+                except Exception:
+                    pass
+
+    def check_tag(self, tag_code, direction="entrada"):
+        """Devolve (autorizado, info, status_type) para o TagManager."""
+        tag_code = str(tag_code).strip()
+        # direction viaja como extra: o AccessController valida so tag_code e
+        # ignora o resto, entao e inofensivo hoje e pronto quando ele aceitar.
+        status, body = self._post({"tag_code": tag_code, "direction": direction})
+
+        if status != 200 or not isinstance(body, dict):
+            print("[SERVER] Sem decisao (status", status, ") para tag", tag_code)
+            return False, {"status": status, "mode": "server_error"}, "server_error"
+
+        # "open" e a fonte da verdade; "decision" e o fallback. Ausentes = negado.
+        if "open" in body:
+            authorized = body.get("open") is True
+        else:
+            authorized = str(body.get("decision", "")).lower() == "allowed"
+
+        print("[SERVER] Tag", tag_code, "->", "LIBERADA" if authorized else "NEGADA")
+        info = {"status": 200, "mode": "online", "reason": body.get("reason")}
+        return authorized, info, "online_success" if authorized else "online_denied"
 
     def sync_outbox_item(self, item, overflow_count=0):
-        base_url = self.config.get("server_base_url", "http://sitiobarreiras.app.br:55432").rstrip("/")
-        auth_header = self.config.get("auth_header", "sbs")
-        timeout_sec = self.config.get("server_timeout", 4)
-        url = base_url + "/api/gate/check"
-        headers = {"Authorization": auth_header, "Content-Type": "application/json"}
+        """
+        Reenvia uma passagem liberada offline.
+
+        O gatehouse nao tem endpoint proprio de sincronizacao: ele reavalia a tag
+        e grava um novo AccessRecord com o horario de agora. Os campos offline_*
+        seguem como metadado e hoje sao ignorados pelo servidor.
+        """
         payload = {
-            "code": item.get("tag_code"),
+            "tag_code": item.get("tag_code"),
             "source": item.get("source", "RFID_OFFLINE"),
+            "direction": item.get("direction", "entrada"),
             "offline_timestamp": item.get("timestamp"),
-            "offline_pass": True
+            "offline_pass": True,
         }
         if overflow_count > 0:
             payload["outbox_overflow_count"] = overflow_count
 
-        if requests is None:
-            return False
-
-        try:
-            print(f"[SERVER_CLIENT] Sincronizando item outbox ({item.get('id')})...")
-            res = requests.post(url, json=payload, headers=headers, timeout=timeout_sec)
-            status_code = res.status_code
-            res.close()
-            return status_code in (200, 201)
-        except Exception as exc:
-            print("[SERVER_CLIENT] Erro ao sincronizar item outbox:", exc)
-            return False
+        status, _body = self._post(payload)
+        return status == 200
 
 
 class TagManager:
@@ -1292,12 +748,12 @@ class TagManager:
         self.max_logs = 50
         self.last_authorized_time = 0
 
-    def process_tag(self, tag_code, source="RFID"):
+    def process_tag(self, tag_code, source="RFID", direction="entrada"):
         tag_code = str(tag_code).strip()
         if not tag_code:
             return {"authorized": False, "reason": "Código de tag inválido"}
 
-        is_valid, server_info, status_type = self.server_client.check_tag(tag_code)
+        is_valid, server_info, status_type = self.server_client.check_tag(tag_code, direction=direction)
         authorized = False
         mode = "online"
         reason = ""
@@ -1310,7 +766,7 @@ class TagManager:
         elif status_type == "online_denied":
             authorized = False
             mode = "online"
-            reason = "Tag negada pelo servidor local"
+            reason = server_info.get("reason") or "Tag negada pelo servidor"
             if self.storage_manager:
                 self.storage_manager.add_to_history(tag_code, authorized=False)
         else:
@@ -1349,6 +805,7 @@ class TagManager:
             "gate_triggered": gate_triggered,
             "barrier_clear": barrier_clear,
             "source": source,
+            "direction": direction,
             "reason": reason,
             "mode": mode,
             "server_status": server_info.get("status", 0),
@@ -1366,13 +823,14 @@ class TagManager:
 
 
 class WebServer:
-    def __init__(self, config_manager, wifi_manager, sensor_manager, gate_relay, tag_manager, port=80):
+    def __init__(self, config_manager, wifi_manager, sensor_manager, gate_relay, tag_manager, readers=None, port=None):
         self.config = config_manager
         self.wifi = wifi_manager
         self.sensors = sensor_manager
         self.relay = gate_relay
         self.tags = tag_manager
-        self.port = port
+        self.readers = readers or []
+        self.port = port if port is not None else self.config.get("web_port", 80)
         self.server_socket = None
 
     def start(self):
@@ -1381,107 +839,310 @@ class WebServer:
             self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self.server_socket.bind(addr)
-            self.server_socket.listen(5)
-            print("Servidor web iniciado na porta", self.port, "- Acesse http://" + self.wifi.ip_address)
+            self.server_socket.listen(2)
+            self.server_socket.settimeout(0)
+            print("Servidor web na porta", self.port, "- http://%s:%d" % (self.wifi.ip_address, self.port))
         except Exception as exc:
             print("Erro ao iniciar servidor socket:", exc)
+            self.server_socket = None
 
-    def handle_client(self, client_sock):
+    def poll(self):
+        """Aceita no maximo uma conexao por iteracao, sem bloquear o loop."""
+        if self.server_socket is None:
+            return
+        client_sock = None
         try:
-            client_sock.settimeout(2.0)
-            req_data = client_sock.recv(4096)
-            if not req_data:
-                client_sock.close()
-                return
-
-            req_str = req_data.decode("utf-8", "ignore")
-            lines = req_str.split("\r\n")
-            if not lines or len(lines[0].split()) < 2:
-                client_sock.close()
-                return
-
-            method, path = lines[0].split()[:2]
-            body = ""
-            if method == "POST":
-                parts = req_str.split("\r\n\r\n", 1)
-                if len(parts) > 1:
-                    body = parts[1]
-
-            if method == "GET" and path in ("/", "/index.html"):
-                self._send_html(client_sock, INDEX_HTML)
-            elif method == "GET" and path == "/api/status":
-                self._send_json(client_sock, {
-                    "sensors": self.sensors.get_all_status(),
-                    "wifi": self.wifi.get_status(),
-                    "relay": self.relay.get_status(),
-                })
-            elif method == "GET" and path == "/api/config":
-                cfg = dict(self.config.config)
-                cfg["wifi_password"] = "******" if cfg.get("wifi_password") else ""
-                self._send_json(client_sock, cfg)
-            elif method == "POST" and path == "/api/config":
-                try:
-                    payload = json.loads(body or "{}")
-                    if payload.get("wifi_password") == "******":
-                        del payload["wifi_password"]
-                    self.config.update(payload)
-                    self._send_json(client_sock, {"success": True, "message": "Configurações salvas com sucesso!"})
-                except Exception as exc:
-                    self._send_json(client_sock, {"success": False, "error": str(exc)}, status=400)
-            elif method == "GET" and path == "/api/tags":
-                self._send_json(client_sock, self.tags.get_logs())
-            elif method == "POST" and path == "/api/scan":
-                try:
-                    payload = json.loads(body or "{}")
-                    result = self.tags.process_tag(payload.get("code", ""), source="WEB_MANUAL")
-                    self._send_json(client_sock, result)
-                except Exception as exc:
-                    self._send_json(client_sock, {"success": False, "error": str(exc)}, status=400)
-            elif method == "POST" and path == "/api/trigger":
-                success, message = self.relay.trigger_open()
-                self._send_json(client_sock, {"success": success, "message": message}, status=200 if success else 400)
-            else:
-                self._send_response(client_sock, 404, "text/plain", "404 Not Found")
+            client_sock, _addr = self.server_socket.accept()
+        except Exception:
+            return  # nenhuma conexao pendente
+        try:
+            self.handle_client(client_sock)
         except Exception as exc:
-            print("Erro ao tratar requisição do cliente:", exc)
+            print("Erro ao tratar requisicao:", exc)
         finally:
             try:
                 client_sock.close()
             except Exception:
                 pass
+            gc.collect()
 
-    def poll(self):
-        if self.server_socket is None:
+    # --- parsing da requisicao ---
+
+    def _read_request(self, client_sock):
+        """
+        Le cabecalhos e corpo. Devolve (metodo, caminho, auth, corpo) ou None.
+
+        O corpo e lido ate completar o Content-Length: um unico recv() corta
+        payloads que o cliente manda em mais de um pacote.
+        """
+        client_sock.settimeout(2.0)
+        data = client_sock.recv(1024)
+        if not data:
+            return None
+
+        while b"\r\n\r\n" not in data and len(data) < 4096:
+            more = client_sock.recv(1024)
+            if not more:
+                break
+            data += more
+
+        head, _sep, body = data.partition(b"\r\n\r\n")
+        lines = head.decode("utf-8", "ignore").split("\r\n")
+        parts = lines[0].split()
+        if len(parts) < 2:
+            return None
+        method, path = parts[0], parts[1]
+
+        auth = ""
+        length = 0
+        for line in lines[1:]:
+            low = line.lower()
+            if low.startswith("authorization:"):
+                auth = line.split(":", 1)[1].strip()
+            elif low.startswith("content-length:"):
+                try:
+                    length = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    length = 0
+
+        while len(body) < length:
+            more = client_sock.recv(min(512, length - len(body)))
+            if not more:
+                break
+            body += more
+
+        return method, path, auth, body.decode("utf-8", "ignore")
+
+    def handle_client(self, client_sock):
+        req = self._read_request(client_sock)
+        if req is None:
             return
-        try:
-            self.server_socket.settimeout(0.1)
-            client_sock, _addr = self.server_socket.accept()
-            self.handle_client(client_sock)
-        except Exception:
-            pass
+        method, path, auth, body = req
 
-    def _send_html(self, client_sock, html):
-        body = html.encode("utf-8")
-        header = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n".format(len(body))
-        client_sock.sendall(header.encode("utf-8"))
-        client_sock.sendall(body)
+        if method == "GET" and path in ("/", "/index.html"):
+            self._send_file(client_sock, INDEX_FILE)
+
+        elif method == "GET" and path == "/health":
+            # Contrato do gatehouse: indicador de "Pi online" no dashboard.
+            self._send_json(client_sock, {"status": "ok"})
+
+        elif method == "POST" and path == "/open":
+            self._handle_open(client_sock, auth, body)
+
+        elif method == "GET" and path == "/api/status":
+            self._send_json(client_sock, {
+                "sensors": self.sensors.get_all_status(),
+                "readers": [r.get_status() for r in self.readers],
+                "wifi": self.wifi.get_status(),
+                "relay": self.relay.get_status(),
+            })
+
+        elif method == "GET" and path == "/api/config":
+            cfg = dict(self.config.config)
+            cfg["wifi_password"] = "******" if cfg.get("wifi_password") else ""
+            cfg["open_token"] = "******" if cfg.get("open_token") else ""
+            self._send_json(client_sock, cfg)
+
+        elif method == "POST" and path == "/api/config":
+            try:
+                payload = json.loads(body or "{}")
+                for masked in ("wifi_password", "open_token"):
+                    if payload.get(masked) == "******":
+                        del payload[masked]
+                antes = (self.config.get("wifi_ssid"), self.config.get("wifi_password"))
+                self.config.update(payload)
+                # Mudou a rede? Tenta agora — inclusive para sair do modo AP,
+                # que e justamente onde o operador corrige a senha.
+                if (self.config.get("wifi_ssid"), self.config.get("wifi_password")) != antes:
+                    self.wifi.reconfigurado()
+                self._send_json(client_sock, {"success": True, "message": "Configuracoes salvas com sucesso!"})
+            except Exception as exc:
+                self._send_json(client_sock, {"success": False, "error": str(exc)}, status=400)
+
+        elif method == "GET" and path == "/api/tags":
+            self._send_json(client_sock, self.tags.get_logs())
+
+        elif method == "POST" and path == "/api/scan":
+            try:
+                payload = json.loads(body or "{}")
+                result = self.tags.process_tag(payload.get("code", ""), source="WEB_MANUAL",
+                                               direction=payload.get("direction", "entrada"))
+                self._send_json(client_sock, result)
+            except Exception as exc:
+                self._send_json(client_sock, {"success": False, "error": str(exc)}, status=400)
+
+        elif method == "POST" and path == "/api/calibrar":
+            self._handle_calibrar(client_sock, body)
+
+        elif method == "POST" and path == "/api/trigger":
+            success, message = self.relay.trigger_open()
+            self._send_json(client_sock, {"success": success, "message": message},
+                            status=200 if success else 400)
+        else:
+            self._send_response(client_sock, 404, "text/plain", "404 Not Found")
+
+    def _handle_calibrar(self, client_sock, body):
+        """
+        Deduz tag_offset/tag_trim a partir da ultima tag lida.
+
+        O operador aproxima uma tag ja cadastrada, digita o codigo dela e o
+        sistema descobre os cortes sozinho, gravando na config.
+        """
+        try:
+            esperado = str(json.loads(body or "{}").get("tag_code", "")).strip()
+        except Exception:
+            self._send_json(client_sock, {"success": False, "error": "JSON invalido"}, status=400)
+            return
+        if not esperado:
+            self._send_json(client_sock, {"success": False,
+                                          "error": "Informe o codigo da tag cadastrada"}, status=400)
+            return
+
+        limiar = self.config.get("tag_offset_threshold", 20)
+        lidos = 0
+        for leitor in self.readers:
+            if not leitor.last_frame:
+                continue
+            lidos += 1
+            achado = calibrar_offset_trim(leitor.last_frame, esperado, limiar)
+            if achado:
+                self.config.update(achado)
+                print("[CALIBRACAO] %s -> offset %d, trim %d, limiar %d"
+                      % (leitor.direction, achado["tag_offset"], achado["tag_trim"],
+                         achado["tag_offset_threshold"]))
+                self._send_json(client_sock, {
+                    "success": True,
+                    "direction": leitor.direction,
+                    "frame": "".join(["%02X" % b for b in leitor.last_frame]),
+                    "tag_offset": achado["tag_offset"],
+                    "tag_trim": achado["tag_trim"],
+                    "tag_offset_threshold": achado["tag_offset_threshold"],
+                    "message": "Calibrado pelo leitor de %s e salvo." % leitor.direction,
+                })
+                return
+
+        if lidos == 0:
+            msg = "Nenhuma tag foi lida ainda. Aproxime a tag de um leitor e tente de novo."
+        else:
+            msg = ("O codigo informado nao aparece no ultimo frame lido. "
+                   "Confira o codigo cadastrado ou leia a tag novamente.")
+        self._send_json(client_sock, {"success": False, "error": msg,
+                                      "frames": ["".join(["%02X" % b for b in r.last_frame])
+                                                 for r in self.readers if r.last_frame]},
+                        status=400)
+
+    def _handle_open(self, client_sock, auth, body):
+        """
+        Abertura manual comandada pelo SB Gatehouse (ADR 0011).
+            POST /open  {"portaria": 1}  ->  200 {"opened": true}
+        """
+        token = self.config.get("open_token", "")
+        if token and auth != token:
+            print("[OPEN] Recusado: token invalido")
+            self._send_json(client_sock, {"opened": False, "reason": "unauthorized"}, status=401)
+            return
+
+        success, message = self.relay.trigger_open()
+        print("[OPEN] Abertura manual do gatehouse:", message)
+        self._send_json(client_sock, {"opened": success, "reason": None if success else message},
+                        status=200 if success else 409)
+
+    # --- respostas ---
+
+    def _send_file(self, client_sock, path, content_type="text/html; charset=utf-8"):
+        """
+        Envia o arquivo em blocos, direto do flash.
+
+        Nunca carrega o conteudo inteiro na RAM. E o que permite servir 28KB de
+        HTML num heap de ~190KB sem MemoryError por fragmentacao.
+        """
+        try:
+            size = os.stat(path)[6]
+        except Exception:
+            # A UI vive no flash, nao mais embutida no main.py. Se a pasta wwwroot/
+            # nao subiu para o dispositivo, um 404 seco nao diz o que houve.
+            if path == INDEX_FILE:
+                self._send_response(client_sock, 200, "text/html; charset=utf-8", FALLBACK_HTML)
+            else:
+                self._send_response(client_sock, 404, "text/plain", "404 Not Found")
+            return
+        self._send_headers(client_sock, 200, content_type, size)
+        with open(path, "rb") as f:
+            while True:
+                chunk = f.read(512)
+                if not chunk:
+                    break
+                client_sock.sendall(chunk)
+
+    def _send_headers(self, client_sock, status, content_type, length):
+        reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
+                  404: "Not Found", 409: "Conflict"}.get(status, "OK")
+        header = "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n"
+        client_sock.sendall(header.format(status, reason, content_type, length).encode("utf-8"))
 
     def _send_json(self, client_sock, data, status=200):
         body = json.dumps(data).encode("utf-8")
-        header = "HTTP/1.1 {} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n".format(status, len(body))
-        client_sock.sendall(header.encode("utf-8"))
+        self._send_headers(client_sock, status, "application/json", len(body))
         client_sock.sendall(body)
 
     def _send_response(self, client_sock, status_code, content_type, body_text):
         body = body_text.encode("utf-8")
-        header = "HTTP/1.1 {} OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n".format(status_code, content_type, len(body))
-        client_sock.sendall(header.encode("utf-8"))
+        self._send_headers(client_sock, status_code, content_type, len(body))
         client_sock.sendall(body)
 
 
+def diagnostico(config, wifi, web_server, readers=()):
+    """
+    Estado de cada camada em um unico boot: sem isso, uma falha do servidor web
+    e indistinguivel de uma falha de arquivo, de RAM ou de rede.
+    """
+    print("\n===== DIAGNOSTICO =====")
+
+    print("Wi-Fi   :", wifi.state, "| IP", wifi.ip_address, "| modo", wifi.mode)
+    if wifi.state != WIFI_CONECTADO:
+        print("          ainda sem rede - o resto do sistema ja esta no ar")
+
+    # A UI e servida do flash; sem o arquivo, GET / responde 404.
+    try:
+        tamanho = os.stat(INDEX_FILE)[6]
+        print("UI      :", INDEX_FILE, "OK -", tamanho, "bytes")
+    except Exception:
+        print("UI      : FALTA", INDEX_FILE, "- envie a pasta wwwroot/ para o dispositivo")
+        try:
+            print("          raiz do flash:", os.listdir())
+        except Exception:
+            pass
+
+    if requests is None:
+        print("HTTP    : SEM CLIENTE - instale urequests (mpremote mip install urequests)")
+        print("          sem ele nenhuma tag e consultada no servidor")
+    else:
+        print("HTTP    : cliente disponivel")
+    print("Servidor:", config.get("server_base_url") + config.get("access_path"))
+
+    for leitor in readers:
+        if leitor.uart is None:
+            print("LEITOR  : %-8s NAO INICIALIZOU (UART%d RX GP%d)"
+                  % (leitor.direction, leitor.uart_id, leitor.rx_pin))
+        else:
+            print("LEITOR  : %-8s UART%d RX GP%d a %d bps"
+                  % (leitor.direction, leitor.uart_id, leitor.rx_pin,
+                     config.get("reader_baudrate", 115200)))
+    if config.get("tag_debug", 0):
+        print("          tag_debug LIGADO - cada frame imprime o HEX bruto")
+        print("          calibre tag_offset/tag_trim comparando com uma tag conhecida")
+
+    if web_server.server_socket is None:
+        print("WEB     : NAO INICIOU - veja o erro de socket acima")
+    else:
+        print("WEB     : escutando em http://%s:%d" % (wifi.ip_address, web_server.port))
+
+    print("RAM     :", gc.mem_free(), "bytes livres")
+    print("=======================\n")
+
+
 def main():
-    if hasattr(gc, "collect"):
-        gc.collect()
+    gc.collect()
 
     print("Iniciando sistema Gate Automation...")
 
@@ -1493,27 +1154,41 @@ def main():
     server_client = ServerClient(config)
     storage_manager = StorageManager(config) if StorageManager else None
     tag_mgr = TagManager(config, server_client, sensors, relay, storage_manager=storage_manager)
-    web_server = WebServer(config, wifi, sensors, relay, tag_mgr, port=80)
+    readers = [
+        TagReader(config, config.get("reader_in_uart", 1),
+                  config.get("reader_in_rx", 5), "entrada"),
+        TagReader(config, config.get("reader_out_uart", 0),
+                  config.get("reader_out_rx", 1), "saida"),
+    ]
+    web_server = WebServer(config, wifi, sensors, relay, tag_mgr, readers=readers)
     web_server.start()
 
-    print("\n[OK] Sistema rodando com sucesso!")
-    print("Monitorando sensores: RFID (UART), Barreira (GPIO 2), Hall (GPIO 3), Aux (GPIO 4)...")
-    print("Pressione Ctrl+C para encerrar.\n")
+    diagnostico(config, wifi, web_server, readers)
 
-    last_sync_time = time.time()
+    last_sync = ticks_ms()
+    sync_interval = 10000
 
     try:
         while True:
-            tag_code = sensors.poll_rfid()
-            if tag_code:
-                print("Tag RFID detectada via UART:", tag_code)
-                tag_mgr.process_tag(tag_code, source="UART_RFID")
+            for leitor in readers:
+                tag_code = leitor.poll()
+                if tag_code:
+                    print("Tag lida (%s):" % leitor.direction, tag_code)
+                    tag_mgr.process_tag(tag_code, source="UART_RFID",
+                                        direction=leitor.direction)
 
-            # Worker de sincronização da outbox (a cada 10 segundos)
-            now = time.time()
-            if now - last_sync_time > 10:
-                last_sync_time = now
-                if wifi.is_connected() and storage_manager:
+            # Fecha o portao quando o pulso expira (nao bloqueia o loop).
+            relay.update()
+
+            # Avanca a maquina de estados do Wi-Fi (uma transicao por volta).
+            wifi.tick()
+
+            web_server.poll()
+
+            # Worker de sincronizacao da outbox.
+            if ticks_diff(ticks_ms(), last_sync) > sync_interval:
+                last_sync = ticks_ms()
+                if wifi.mode == "STA" and wifi.is_connected and storage_manager:
                     outbox = storage_manager.get_outbox()
                     if outbox:
                         overflow = storage_manager.get_overflow_count()
@@ -1523,8 +1198,7 @@ def main():
                             if overflow > 0:
                                 storage_manager.reset_overflow_count()
 
-            web_server.poll()
-            time.sleep(0.05)
+            time.sleep(0.02)
     except KeyboardInterrupt:
         print("\nEncerrando sistema...")
 
