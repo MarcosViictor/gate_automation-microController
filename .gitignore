@@ -21,3 +21,13 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+# Task de upload do Pico (mantida no versionamento)
+!.vscode/tasks.json
+
+# Artefatos de CPython (o Pico roda MicroPython; isto so atrapalha no upload)
+__pycache__/
+*.pyc
+
+# Config real do dispositivo: contem a senha do Wi-Fi e o segredo do /open.
+# Versionamos apenas o config.example.json.
+config.json
