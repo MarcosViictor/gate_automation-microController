@@ -652,6 +652,9 @@ class ServerClient:
 
     def __init__(self, config_manager):
         self.config = config_manager
+        # Nem toda versao do urequests aceita 'timeout'. Descobrimos na primeira
+        # requisicao e lembramos, para nao pagar a excecao a cada tag lida.
+        self._aceita_timeout = True
 
     def _endpoint(self):
         base = self.config.get("server_base_url", DEFAULT_CONFIG["server_base_url"])
@@ -670,12 +673,7 @@ class ServerClient:
 
         res = None
         try:
-            res = requests.post(
-                self._endpoint(),
-                json=payload,
-                headers=headers,
-                timeout=self.config.get("server_timeout", 1),
-            )
+            res = self._enviar(payload, headers)
             status = res.status_code
             try:
                 body = res.json()
@@ -693,6 +691,27 @@ class ServerClient:
                     res.close()
                 except Exception:
                     pass
+
+    def _enviar(self, payload, headers):
+        """
+        Faz o POST, contornando urequests sem suporte a 'timeout'.
+
+        Sem esta saida o TypeError derrubaria TODA consulta: nenhuma requisicao
+        chegaria ao servidor, toda tag cairia no fallback offline e o sintoma
+        no campo seria "o portao nao abre para ninguem e o servidor nao registra
+        nada" — apontando para a rede quando a causa e o cliente HTTP.
+        """
+        url = self._endpoint()
+        if self._aceita_timeout:
+            try:
+                return requests.post(url, json=payload, headers=headers,
+                                     timeout=self.config.get("server_timeout", 1))
+            except TypeError:
+                self._aceita_timeout = False
+                print("[SERVER] Este urequests nao aceita 'timeout'.")
+                print("[SERVER] Seguindo sem ele: uma requisicao travada pode")
+                print("[SERVER] segurar o loop principal ate o servidor responder.")
+        return requests.post(url, json=payload, headers=headers)
 
     def check_tag(self, tag_code, direction="entrada"):
         """Devolve (autorizado, info, status_type) para o TagManager."""
