@@ -366,6 +366,9 @@ WLAN_STATUS = {
     -3: "senha incorreta",
 }
 WLAN_TERMINAL = (-1, -2, -3)
+# Codigos de avanco. 1 e associacao em curso; 2 e associacao FEITA — senha e SSID
+# ja provados certos — faltando so o IP. Sao marcos, nao estados de espera.
+WLAN_PROGRESSO = (1, 2)
 
 WIFI_OCIOSO = "ocioso"
 WIFI_ASSOCIANDO = "associando"
@@ -387,6 +390,7 @@ class WifiManager:
         self._deadline = 0
         self._backoff = 0
         self._last_code = None
+        self._progresso_max = 0
         # Ligado quando o IP fixo falha; a partir dai as tentativas vao em DHCP.
         self._dhcp_forcado = False
         self._ip_fixo_ativo = False
@@ -466,8 +470,9 @@ class WifiManager:
             print("[WIFI] Erro ao iniciar conexao:", exc)
 
         self._last_code = None
+        self._progresso_max = 0
         self.state = WIFI_ASSOCIANDO
-        self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
+        self._renovar_prazo()
 
     def _subir_radio(self):
         """
@@ -540,6 +545,16 @@ class WifiManager:
             print("[WIFI]  ...", self._status_text(code))
             self._last_code = code
 
+        # O prazo e para "nada acontece", nao para o tempo total: cada avanco
+        # reinicia o relogio. Derrubar uma associacao ja feita no meio do DHCP
+        # nao acelera nada — faz o roteador recomecar a negociacao do zero, e
+        # um DHCP mais lento que o prazo nunca chegaria ao fim.
+        # So avancos contam, entao sao no maximo duas renovacoes por tentativa:
+        # oscilar entre dois codigos nao estica o prazo para sempre.
+        if code in WLAN_PROGRESSO and code > self._progresso_max:
+            self._progresso_max = code
+            self._renovar_prazo()
+
         # Codigo terminal: nenhuma espera resolve senha errada ou rede ausente.
         if code in WLAN_TERMINAL:
             print("[WIFI] Erro de configuracao:", self._status_text(code))
@@ -553,6 +568,13 @@ class WifiManager:
                 self._dhcp_forcado = True
                 self._ip_fixo_ativo = False
                 print("[WIFI] IP fixo falhou, tentando DHCP.")
+            elif self._progresso_max >= 2:
+                # Associacao feita e IP nao veio: chamar isso de "rede
+                # indisponivel" mandaria o operador conferir a senha certa.
+                print("[WIFI] Associado, mas o DHCP nao entregou IP no prazo.")
+                print("[WIFI] Senha e SSID estao certos - o impasse e a entrega do IP.")
+                print("[WIFI] Se a rede exige aceite em pagina ou nao da IP a este")
+                print("[WIFI] dispositivo, configure wifi_static_ip e pule o DHCP.")
             else:
                 print("[WIFI] Rede indisponivel no momento.")
             self._virar_aguardando()
@@ -575,6 +597,9 @@ class WifiManager:
         print("Conectado ao Wi-Fi! Acesse http://%s:%s"
               % (self.ip_address, self.config.get("web_port", 80)))
         print("[WIFI] gateway", cfg[2], "| mascara", cfg[1], "| DNS", cfg[3])
+
+    def _renovar_prazo(self):
+        self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
 
     def _virar_sem_radio(self):
         """Mesmo backoff do aguardando, com estado proprio: o painel e o console
