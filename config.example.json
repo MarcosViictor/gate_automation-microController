@@ -34,7 +34,5 @@
     "max_history_size": 100,
     "max_outbox_size": 200,
     "web_port": 80,
-    "open_token": "",
-    "admin_user": "admin",
-    "admin_password": ""
+    "open_token": ""
 }

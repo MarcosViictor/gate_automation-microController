@@ -16,11 +16,6 @@ except ImportError:
     import socket
 
 try:
-    import ubinascii as binascii
-except ImportError:
-    import binascii
-
-try:
     import urequests as requests
 except ImportError:
     try:
@@ -97,33 +92,10 @@ DEFAULT_CONFIG = {
     "web_port": 80,
     # Segredo do POST /open vindo do gatehouse (RASPBERRY_SECRET). Vazio = sem auth.
     "open_token": "",
-    # Login da area de configuracao e das acoes que mexem no portao.
-    # Senha vazia deixa tudo aberto de proposito: trancar por padrao inutilizaria
-    # um Pico ja instalado que subisse este firmware sem senha gravada antes.
-    "admin_user": "admin",
-    "admin_password": "",
 }
 
 CONFIG_FILE = "config.json"
 INDEX_FILE = "wwwroot/index.html"
-CONFIG_PAGE_FILE = "wwwroot/config.html"
-
-# Tudo que le/grava configuracao ou mexe no portao. O painel de status e o
-# historico ficam de fora: sao leitura, e travar isso so atrapalharia a portaria.
-# /open nao entra aqui — tem o proprio segredo, o open_token do gatehouse.
-# Segredos que nunca saem do dispositivo em texto claro. O GET devolve "******"
-# e o POST descarta esse valor, para a tela poder reenviar o formulario inteiro
-# sem apagar o que nao foi digitado de novo.
-MASCARADAS = ("wifi_password", "open_token", "admin_password")
-
-PROTEGIDAS = (
-    "/config",
-    "/config.html",
-    "/api/config",
-    "/api/trigger",
-    "/api/scan",
-    "/api/calibrar",
-)
 
 # Pagina minima servida quando wwwroot/index.html nao esta no dispositivo.
 # Curta de proposito: fica residente na RAM, ao contrario da UI real.
@@ -366,15 +338,11 @@ WLAN_STATUS = {
     -3: "senha incorreta",
 }
 WLAN_TERMINAL = (-1, -2, -3)
-# Codigos de avanco. 1 e associacao em curso; 2 e associacao FEITA — senha e SSID
-# ja provados certos — faltando so o IP. Sao marcos, nao estados de espera.
-WLAN_PROGRESSO = (1, 2)
 
 WIFI_OCIOSO = "ocioso"
 WIFI_ASSOCIANDO = "associando"
 WIFI_CONECTADO = "conectado"
 WIFI_AGUARDANDO = "aguardando"
-WIFI_SEM_RADIO = "sem radio"
 WIFI_AP = "ap"
 
 
@@ -390,7 +358,6 @@ class WifiManager:
         self._deadline = 0
         self._backoff = 0
         self._last_code = None
-        self._progresso_max = 0
         # Ligado quando o IP fixo falha; a partir dai as tentativas vao em DHCP.
         self._dhcp_forcado = False
         self._ip_fixo_ativo = False
@@ -424,7 +391,7 @@ class WifiManager:
             self._em_associando()
         elif self.state == WIFI_CONECTADO:
             self._em_conectado()
-        elif self.state in (WIFI_AGUARDANDO, WIFI_SEM_RADIO):
+        elif self.state == WIFI_AGUARDANDO:
             self._em_aguardando()
         elif self.state == WIFI_OCIOSO:
             self._iniciar_sta()
@@ -458,10 +425,7 @@ class WifiManager:
 
         self.mode = "STA"
         self.wlan = network.WLAN(network.STA_IF)
-        if not self._subir_radio():
-            self._virar_sem_radio()
-            return
-
+        self.wlan.active(True)
         self._aplicar_ip_fixo()
         print("Tentando conectar a rede Wi-Fi:", ssid)
         try:
@@ -470,38 +434,8 @@ class WifiManager:
             print("[WIFI] Erro ao iniciar conexao:", exc)
 
         self._last_code = None
-        self._progresso_max = 0
         self.state = WIFI_ASSOCIANDO
-        self._renovar_prazo()
-
-    def _subir_radio(self):
-        """
-        Liga a interface e confere que ela subiu de verdade.
-
-        active(True) nao levanta excecao quando o radio nao inicializa: ele
-        volta calado e a interface continua desligada. Sem esta conferencia o
-        connect() seguinte falha com EPERM — que parece erro de rede, e nao e —
-        e o sistema passa a acusar "rede indisponivel" para um problema que
-        esta no radio, escondendo a causa real de quem le o console.
-        """
-        try:
-            self.wlan.active(True)
-        except Exception as exc:
-            print("[WIFI] Erro ao ligar o radio:", exc)
-            return False
-
-        try:
-            ativo = bool(self.wlan.active())
-        except Exception as exc:
-            print("[WIFI] Erro ao consultar o radio:", exc)
-            return False
-
-        if not ativo:
-            print("[RADIO] O Wi-Fi nao inicializou: active() continua False depois de active(True).")
-            print("[RADIO] Isto nao e senha, SSID nem alcance - o radio nem entrou no ar.")
-            print("[RADIO] Confira se a placa tem Wi-Fi (Pico W / Pico 2 W) e se o firmware")
-            print("[RADIO] gravado e o do mesmo modelo da placa.")
-        return ativo
+        self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
 
     def _aplicar_ip_fixo(self):
         """
@@ -545,16 +479,6 @@ class WifiManager:
             print("[WIFI]  ...", self._status_text(code))
             self._last_code = code
 
-        # O prazo e para "nada acontece", nao para o tempo total: cada avanco
-        # reinicia o relogio. Derrubar uma associacao ja feita no meio do DHCP
-        # nao acelera nada — faz o roteador recomecar a negociacao do zero, e
-        # um DHCP mais lento que o prazo nunca chegaria ao fim.
-        # So avancos contam, entao sao no maximo duas renovacoes por tentativa:
-        # oscilar entre dois codigos nao estica o prazo para sempre.
-        if code in WLAN_PROGRESSO and code > self._progresso_max:
-            self._progresso_max = code
-            self._renovar_prazo()
-
         # Codigo terminal: nenhuma espera resolve senha errada ou rede ausente.
         if code in WLAN_TERMINAL:
             print("[WIFI] Erro de configuracao:", self._status_text(code))
@@ -568,13 +492,6 @@ class WifiManager:
                 self._dhcp_forcado = True
                 self._ip_fixo_ativo = False
                 print("[WIFI] IP fixo falhou, tentando DHCP.")
-            elif self._progresso_max >= 2:
-                # Associacao feita e IP nao veio: chamar isso de "rede
-                # indisponivel" mandaria o operador conferir a senha certa.
-                print("[WIFI] Associado, mas o DHCP nao entregou IP no prazo.")
-                print("[WIFI] Senha e SSID estao certos - o impasse e a entrega do IP.")
-                print("[WIFI] Se a rede exige aceite em pagina ou nao da IP a este")
-                print("[WIFI] dispositivo, configure wifi_static_ip e pule o DHCP.")
             else:
                 print("[WIFI] Rede indisponivel no momento.")
             self._virar_aguardando()
@@ -597,15 +514,6 @@ class WifiManager:
         print("Conectado ao Wi-Fi! Acesse http://%s:%s"
               % (self.ip_address, self.config.get("web_port", 80)))
         print("[WIFI] gateway", cfg[2], "| mascara", cfg[1], "| DNS", cfg[3])
-
-    def _renovar_prazo(self):
-        self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
-
-    def _virar_sem_radio(self):
-        """Mesmo backoff do aguardando, com estado proprio: o painel e o console
-        precisam distinguir 'a rede sumiu' de 'o radio nao existe'."""
-        self._virar_aguardando()
-        self.state = WIFI_SEM_RADIO
 
     def _virar_aguardando(self):
         base = int(self.config.get("wifi_retry_base_seconds", 5))
@@ -653,7 +561,6 @@ class WifiManager:
             "ip": self.ip_address,
             "mode": self.mode,
             "ip_mode": self.get_ip_mode(),
-            "radio_ok": self.state != WIFI_SEM_RADIO,
             "ssid": self.config.get("wifi_ssid", ""),
         }
 
@@ -1174,18 +1081,8 @@ class WebServer:
             return
         method, path, auth, body = req
 
-        # Uma guarda so, na entrada: espalhar o if por rota deixa a proxima rota
-        # protegida a um esquecimento de distancia.
-        if path in PROTEGIDAS and not self._autorizado(auth):
-            print("[AUTH] Recusado:", method, path)
-            self._pedir_login(client_sock, json_esperado=path.startswith("/api/"))
-            return
-
         if method == "GET" and path in ("/", "/index.html"):
             self._send_file(client_sock, INDEX_FILE)
-
-        elif method == "GET" and path in ("/config", "/config.html"):
-            self._send_file(client_sock, CONFIG_PAGE_FILE)
 
         elif method == "GET" and path == "/health":
             # Contrato do gatehouse: indicador de "Pi online" no dashboard.
@@ -1204,14 +1101,14 @@ class WebServer:
 
         elif method == "GET" and path == "/api/config":
             cfg = dict(self.config.config)
-            for masked in MASCARADAS:
-                cfg[masked] = "******" if cfg.get(masked) else ""
+            cfg["wifi_password"] = "******" if cfg.get("wifi_password") else ""
+            cfg["open_token"] = "******" if cfg.get("open_token") else ""
             self._send_json(client_sock, cfg)
 
         elif method == "POST" and path == "/api/config":
             try:
                 payload = json.loads(body or "{}")
-                for masked in MASCARADAS:
+                for masked in ("wifi_password", "open_token"):
                     if payload.get(masked) == "******":
                         del payload[masked]
                 antes = self._chaves_de_rede()
@@ -1298,37 +1195,6 @@ class WebServer:
                                                  for r in self.readers if r.last_frame]},
                         status=400)
 
-    # --- autenticacao da area protegida ---
-
-    def _autorizado(self, auth):
-        """
-        Confere o header Authorization: Basic.
-
-        Senha vazia libera tudo, e isso e deliberado: um Pico ja instalado que
-        recebesse este firmware sem senha gravada antes ficaria inacessivel pela
-        propria tela que define a senha. O aviso no boot cobre o risco.
-        """
-        senha = self.config.get("admin_password", "")
-        if not senha:
-            return True
-        if not auth or not auth.lower().startswith("basic "):
-            return False
-        try:
-            cru = binascii.a2b_base64(auth.split(None, 1)[1]).decode("utf-8")
-        except Exception:
-            return False
-        usuario, _sep, informada = cru.partition(":")
-        return usuario == self.config.get("admin_user", "admin") and informada == senha
-
-    def _pedir_login(self, client_sock, json_esperado=True):
-        cabecalho = 'WWW-Authenticate: Basic realm="Gate Automation"'
-        if json_esperado:
-            self._send_json(client_sock, {"success": False, "error": "Autenticacao necessaria"},
-                            status=401, extra=cabecalho)
-        else:
-            self._send_response(client_sock, 401, "text/html; charset=utf-8",
-                                "<h2>401 - Autenticacao necessaria</h2>", extra=cabecalho)
-
     def _chaves_de_rede(self):
         return tuple(self.config.get(chave) for chave in (
             "wifi_ssid", "wifi_password",
@@ -1378,24 +1244,20 @@ class WebServer:
                     break
                 client_sock.sendall(chunk)
 
-    def _send_headers(self, client_sock, status, content_type, length, extra=None):
+    def _send_headers(self, client_sock, status, content_type, length):
         reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
                   404: "Not Found", 409: "Conflict"}.get(status, "OK")
-        header = ("HTTP/1.1 %s %s\r\nContent-Type: %s\r\nContent-Length: %s\r\n"
-                  % (status, reason, content_type, length))
-        if extra:
-            header += extra + "\r\n"
-        header += "Connection: close\r\n\r\n"
-        client_sock.sendall(header.encode("utf-8"))
+        header = "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n"
+        client_sock.sendall(header.format(status, reason, content_type, length).encode("utf-8"))
 
-    def _send_json(self, client_sock, data, status=200, extra=None):
+    def _send_json(self, client_sock, data, status=200):
         body = json.dumps(data).encode("utf-8")
-        self._send_headers(client_sock, status, "application/json", len(body), extra)
+        self._send_headers(client_sock, status, "application/json", len(body))
         client_sock.sendall(body)
 
-    def _send_response(self, client_sock, status_code, content_type, body_text, extra=None):
+    def _send_response(self, client_sock, status_code, content_type, body_text):
         body = body_text.encode("utf-8")
-        self._send_headers(client_sock, status_code, content_type, len(body), extra)
+        self._send_headers(client_sock, status_code, content_type, len(body))
         client_sock.sendall(body)
 
 
@@ -1407,26 +1269,10 @@ def diagnostico(config, wifi, web_server, readers=()):
     print("\n===== DIAGNOSTICO =====")
 
     print("Wi-Fi   :", wifi.state, "| IP", wifi.ip_address, "| modo", wifi.mode)
-    if wifi.state == WIFI_SEM_RADIO:
-        print("          RADIO NAO INICIALIZOU - nao adianta mexer em SSID ou senha")
-        print("          confira o modelo da placa e o firmware gravado")
-    elif wifi.state != WIFI_CONECTADO:
+    if wifi.state != WIFI_CONECTADO:
         print("          ainda sem rede - o resto do sistema ja esta no ar")
 
-    if not config.get("admin_password", ""):
-        print("SEGURANCA: admin_password vazio - configuracao e acionamento SEM SENHA")
-        print("           defina uma senha em /config antes de usar em producao")
-    else:
-        print("Auth    : area de configuracao protegida (usuario '%s')"
-              % config.get("admin_user", "admin"))
-
     # A UI e servida do flash; sem o arquivo, GET / responde 404.
-    try:
-        tamanho = os.stat(CONFIG_PAGE_FILE)[6]
-        print("Config  :", CONFIG_PAGE_FILE, "OK -", tamanho, "bytes")
-    except Exception:
-        print("Config  : FALTA", CONFIG_PAGE_FILE, "- GET /config responde 404")
-
     try:
         tamanho = os.stat(INDEX_FILE)[6]
         print("UI      :", INDEX_FILE, "OK -", tamanho, "bytes")
