@@ -233,6 +233,7 @@
     .badge-red { background: rgba(239, 68, 68, 0.15); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.3); text-shadow: 0 0 10px rgba(248, 113, 113, 0.3); }
     .badge-yellow { background: rgba(234, 179, 8, 0.15); color: #facc15; border: 1px solid rgba(234, 179, 8, 0.3); text-shadow: 0 0 10px rgba(250, 204, 21, 0.3); }
     .badge-blue { background: rgba(56, 189, 248, 0.15); color: #7dd3fc; border: 1px solid rgba(56, 189, 248, 0.3); text-shadow: 0 0 10px rgba(125, 211, 252, 0.3); }
+    .badge-gray { background: rgba(148, 163, 184, 0.15); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.3); text-shadow: 0 0 10px rgba(203, 213, 225, 0.3); }
 
     /* Action Buttons */
     .btn {
@@ -494,7 +495,7 @@
           </div>
 
           <div class="sensor-card">
-            <div class="sensor-title">2. Sensor Hall (Portão)</div>
+            <div class="sensor-title">2. Fins de Curso (Portão)</div>
             <div id="badge-hall" class="sensor-badge badge-blue">Fechado</div>
           </div>
 
@@ -630,8 +631,22 @@
                 <input type="number" id="cfg-pin-barrier" class="form-control" value="2" required>
               </div>
               <div class="form-group" style="margin-bottom:0;">
-                <label for="cfg-pin-hall">Pino Sensor Hall:</label>
-                <input type="number" id="cfg-pin-hall" class="form-control" value="3" required>
+                <label for="cfg-pin-hall-closed">Pino Hall &mdash; fim de curso FECHADO:</label>
+                <input type="number" id="cfg-pin-hall-closed" class="form-control" value="3" required>
+              </div>
+            </div>
+
+            <div class="form-row" style="margin-bottom: 16px;">
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-pin-hall-open">Pino Hall &mdash; fim de curso ABERTO:</label>
+                <input type="number" id="cfg-pin-hall-open" class="form-control" value="4" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-hall-active-low">Hall aciona em nível:</label>
+                <select id="cfg-hall-active-low" class="form-control">
+                  <option value="1">BAIXO (0) &mdash; padrão com PULL_UP</option>
+                  <option value="0">ALTO (1) &mdash; sensor invertido</option>
+                </select>
               </div>
             </div>
 
@@ -737,12 +752,18 @@
             setBadge('badge-barrier', 'Veículo no Caminho', 'red');
           }
 
-          // 2. Hall Sensor
+          // 2. Fins de curso do portao
           const hallLabel = data.sensors.hall.label;
           if (hallLabel === 'Fechado') {
             setBadge('badge-hall', 'Portão Fechado', 'blue');
-          } else {
+          } else if (hallLabel === 'Aberto') {
             setBadge('badge-hall', 'Portão Aberto', 'yellow');
+          } else if (hallLabel === 'Em movimento') {
+            setBadge('badge-hall', 'Em Movimento', 'gray');
+          } else if (hallLabel === 'Erro nos sensores') {
+            setBadge('badge-hall', 'Erro nos Sensores', 'red');
+          } else {
+            setBadge('badge-hall', 'Hall Indisponível', 'gray');
           }
 
           // 3. Aux Sensor
@@ -875,7 +896,9 @@
           document.getElementById('cfg-relay-pin').value = cfg.relay_pin || 18;
           document.getElementById('cfg-gate-duration').value = cfg.gate_open_duration || 5;
           document.getElementById('cfg-pin-barrier').value = cfg.pin_barrier || 2;
-          document.getElementById('cfg-pin-hall').value = cfg.pin_hall || 3;
+          document.getElementById('cfg-pin-hall-closed').value = cfg.pin_hall_closed != null ? cfg.pin_hall_closed : (cfg.pin_hall || 3);
+          document.getElementById('cfg-pin-hall-open').value = cfg.pin_hall_open != null ? cfg.pin_hall_open : 4;
+          document.getElementById('cfg-hall-active-low').value = String(cfg.hall_active_low != null ? cfg.hall_active_low : 1);
           document.getElementById('cfg-pin-aux').value = cfg.pin_aux || 4;
           document.getElementById('cfg-in-rx').value = cfg.reader_in_rx != null ? cfg.reader_in_rx : 5;
           document.getElementById('cfg-out-rx').value = cfg.reader_out_rx != null ? cfg.reader_out_rx : 1;
@@ -896,7 +919,9 @@
         relay_pin: document.getElementById('cfg-relay-pin').value,
         gate_open_duration: document.getElementById('cfg-gate-duration').value,
         pin_barrier: document.getElementById('cfg-pin-barrier').value,
-        pin_hall: document.getElementById('cfg-pin-hall').value,
+        pin_hall_closed: document.getElementById('cfg-pin-hall-closed').value,
+        pin_hall_open: document.getElementById('cfg-pin-hall-open').value,
+        hall_active_low: document.getElementById('cfg-hall-active-low').value,
         pin_aux: document.getElementById('cfg-pin-aux').value,
         reader_in_rx: document.getElementById('cfg-in-rx').value,
         reader_out_rx: document.getElementById('cfg-out-rx').value,

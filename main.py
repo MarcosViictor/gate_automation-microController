@@ -50,7 +50,15 @@ DEFAULT_CONFIG = {
     "relay_pin": 18,
     "gate_open_duration": 5,
     "pin_barrier": 2,
+    # Fins de curso do portao. pin_hall (chave antiga, sensor unico) ainda e
+    # aceito como o sensor de FECHADO para nao quebrar config.json em campo.
     "pin_hall": 3,
+    "pin_hall_closed": 3,
+    "pin_hall_open": 4,
+    # Nivel que significa "ima presente / fim de curso atingido". Com PULL_UP o
+    # normal e 0; inverta aqui se o sensor instalado for normalmente fechado,
+    # em vez de mexer no codigo com o portao na bancada.
+    "hall_active_low": 1,
     "pin_aux": 4,
     # Dois leitores. No RP2040 o GP5 e RX da UART1 e o GP1 e RX da UART0.
     # So RX e configurado: os leitores transmitem sozinhos, e assim o GP4
@@ -260,9 +268,22 @@ class ConfigManager:
                 data = json.load(f)
                 for key, value in data.items():
                     self.config[key] = value
+            self._migrar_hall(data)
         except Exception as exc:
             print("Aviso ao carregar config.json, usando padrão:", exc)
             self.save()
+
+    def _migrar_hall(self, data):
+        """
+        pin_hall (sensor unico) passa a ser o fim de curso FECHADO.
+
+        Sem isto, um dispositivo em campo com pin_hall num GPIO diferente do
+        padrao herdaria o 3 do DEFAULT_CONFIG em silencio: a chave nova existe
+        no default, entao o get() nunca cairia no valor que o operador gravou.
+        """
+        if "pin_hall" in data and "pin_hall_closed" not in data:
+            self.config["pin_hall_closed"] = data["pin_hall"]
+            print("[CONFIG] pin_hall", data["pin_hall"], "adotado como fim de curso FECHADO")
 
     def save(self):
         try:
@@ -491,17 +512,37 @@ class WifiManager:
         }
 
 
+# Estados do portao derivados dos dois fins de curso.
+GATE_FECHADO = "Fechado"
+GATE_ABERTO = "Aberto"
+GATE_MOVIMENTO = "Em movimento"
+GATE_ERRO = "Erro nos sensores"
+GATE_INDISPONIVEL = "Hall indisponivel"
+
+
 class SensorManager:
+    """
+    Dois halls de fim de curso dizem onde o portao esta.
+
+    Um sensor so nao distingue "fechado" de "no meio do curso": ele apenas nega
+    o unico ponto que conhece. Com um sensor em cada extremo, o meio do curso
+    vira um estado proprio (nenhum ativo) e a fiacao quebrada tambem (os dois
+    ativos ao mesmo tempo, o que fisicamente nao acontece).
+    """
+
     def __init__(self, config_manager):
         self.config = config_manager
         self.barrier_pin = None
-        self.hall_pin = None
+        self.hall_closed_pin = None
+        self.hall_open_pin = None
         self.aux_pin = None
         self.setup_hardware()
 
     def setup_hardware(self):
         pin_b = self.config.get("pin_barrier", 2)
-        pin_h = self.config.get("pin_hall", 3)
+        # O sensor unico antigo (pin_hall) vira este; ver ConfigManager._migrar_hall.
+        pin_hc = self.config.get("pin_hall_closed", 3)
+        pin_ho = self.config.get("pin_hall_open", 4)
         pin_a = self.config.get("pin_aux", 4)
 
         try:
@@ -511,10 +552,16 @@ class SensorManager:
             print("Erro ao configurar pino da barreira:", exc)
 
         try:
-            self.hall_pin = Pin(pin_h, Pin.IN, Pin.PULL_UP)
-            print("Sensor Hall no GPIO", pin_h)
+            self.hall_closed_pin = Pin(pin_hc, Pin.IN, Pin.PULL_UP)
+            print("Hall de fim de curso FECHADO no GPIO", pin_hc)
         except Exception as exc:
-            print("Erro ao configurar pino Hall:", exc)
+            print("Erro ao configurar pino Hall fechado:", exc)
+
+        try:
+            self.hall_open_pin = Pin(pin_ho, Pin.IN, Pin.PULL_UP)
+            print("Hall de fim de curso ABERTO no GPIO", pin_ho)
+        except Exception as exc:
+            print("Erro ao configurar pino Hall aberto:", exc)
 
         try:
             self.aux_pin = Pin(pin_a, Pin.IN, Pin.PULL_UP)
@@ -533,10 +580,37 @@ class SensorManager:
             return "Barreira indisponivel"
         return "Veículo no caminho" if self.barrier_pin.value() == 0 else "Acesso livre"
 
+    def _fim_de_curso_atingido(self, pin):
+        """True quando o ima esta na frente do sensor."""
+        if pin is None:
+            return None
+        ativo_em_zero = bool(int(self.config.get("hall_active_low", 1)))
+        return pin.value() == (0 if ativo_em_zero else 1)
+
+    def get_gate_state(self):
+        fechado = self._fim_de_curso_atingido(self.hall_closed_pin)
+        aberto = self._fim_de_curso_atingido(self.hall_open_pin)
+
+        if fechado is None and aberto is None:
+            return GATE_INDISPONIVEL
+        # Um sensor so: mantem a leitura antiga em vez de chamar tudo de
+        # "em movimento" quando o segundo hall ainda nao foi instalado.
+        if aberto is None:
+            return GATE_FECHADO if fechado else GATE_ABERTO
+        if fechado is None:
+            return GATE_ABERTO if aberto else GATE_FECHADO
+
+        if fechado and aberto:
+            return GATE_ERRO
+        if fechado:
+            return GATE_FECHADO
+        if aberto:
+            return GATE_ABERTO
+        return GATE_MOVIMENTO
+
     def get_hall_status(self):
-        if self.hall_pin is None:
-            return "Hall indisponivel"
-        return "Aberto" if self.hall_pin.value() == 0 else "Fechado"
+        """Nome antigo, agora devolvendo o estado dos dois fins de curso."""
+        return self.get_gate_state()
 
     def is_aux_pressed(self):
         return False
@@ -545,9 +619,10 @@ class SensorManager:
         return "Desativada"
 
     def get_all_status(self):
+        estado = self.get_gate_state()
         return {
             "barrier": {"clear": self.is_barrier_clear(), "label": self.get_barrier_status()},
-            "hall": {"label": self.get_hall_status(), "is_closed": self.get_hall_status() == "Fechado"},
+            "hall": {"label": estado, "state": estado, "is_closed": estado == GATE_FECHADO},
             "aux": {"pressed": self.is_aux_pressed(), "label": self.get_aux_status()},
         }
 
@@ -799,7 +874,7 @@ class TagManager:
                 reason = "Servidor indisponivel e tag nao autorizada no historico local"
 
         barrier_clear = self.sensor_manager.is_barrier_clear() if self.sensor_manager else True
-        hall_status = self.sensor_manager.get_hall_status() if self.sensor_manager else "Fechado"
+        gate_state = self.sensor_manager.get_gate_state() if self.sensor_manager else GATE_FECHADO
         gate_triggered = False
 
         if authorized:
@@ -810,8 +885,15 @@ class TagManager:
                 reason = "Tag não autorizada pelo servidor local"
         elif not barrier_clear:
             reason = "Tag válida, mas portão bloqueado: veículo no caminho"
-        elif hall_status == "Aberto":
+        elif gate_state == GATE_ABERTO:
             reason = "Acesso concedido. Portão já está aberto!"
+        elif gate_state == GATE_MOVIMENTO:
+            # Pulso no meio do curso inverte ou trava o motor na maioria das
+            # centrais. O portao ja esta indo; deixa terminar.
+            reason = "Acesso concedido. Portão em movimento, aguarde!"
+        elif gate_state == GATE_ERRO:
+            print("[SEGURANCA] Os dois fins de curso estao ativos: confira a fiacao dos halls")
+            reason = "Tag válida, mas os dois fins de curso estão ativos: verifique os sensores"
         else:
             success, message = self.gate_relay.trigger_open()
             gate_triggered = success
@@ -823,6 +905,7 @@ class TagManager:
             "authorized": authorized,
             "gate_triggered": gate_triggered,
             "barrier_clear": barrier_clear,
+            "gate_state": gate_state,
             "source": source,
             "direction": direction,
             "reason": reason,
