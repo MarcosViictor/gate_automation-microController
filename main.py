@@ -371,6 +371,7 @@ WIFI_OCIOSO = "ocioso"
 WIFI_ASSOCIANDO = "associando"
 WIFI_CONECTADO = "conectado"
 WIFI_AGUARDANDO = "aguardando"
+WIFI_SEM_RADIO = "sem radio"
 WIFI_AP = "ap"
 
 
@@ -419,7 +420,7 @@ class WifiManager:
             self._em_associando()
         elif self.state == WIFI_CONECTADO:
             self._em_conectado()
-        elif self.state == WIFI_AGUARDANDO:
+        elif self.state in (WIFI_AGUARDANDO, WIFI_SEM_RADIO):
             self._em_aguardando()
         elif self.state == WIFI_OCIOSO:
             self._iniciar_sta()
@@ -453,7 +454,10 @@ class WifiManager:
 
         self.mode = "STA"
         self.wlan = network.WLAN(network.STA_IF)
-        self.wlan.active(True)
+        if not self._subir_radio():
+            self._virar_sem_radio()
+            return
+
         self._aplicar_ip_fixo()
         print("Tentando conectar a rede Wi-Fi:", ssid)
         try:
@@ -464,6 +468,35 @@ class WifiManager:
         self._last_code = None
         self.state = WIFI_ASSOCIANDO
         self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
+
+    def _subir_radio(self):
+        """
+        Liga a interface e confere que ela subiu de verdade.
+
+        active(True) nao levanta excecao quando o radio nao inicializa: ele
+        volta calado e a interface continua desligada. Sem esta conferencia o
+        connect() seguinte falha com EPERM — que parece erro de rede, e nao e —
+        e o sistema passa a acusar "rede indisponivel" para um problema que
+        esta no radio, escondendo a causa real de quem le o console.
+        """
+        try:
+            self.wlan.active(True)
+        except Exception as exc:
+            print("[WIFI] Erro ao ligar o radio:", exc)
+            return False
+
+        try:
+            ativo = bool(self.wlan.active())
+        except Exception as exc:
+            print("[WIFI] Erro ao consultar o radio:", exc)
+            return False
+
+        if not ativo:
+            print("[RADIO] O Wi-Fi nao inicializou: active() continua False depois de active(True).")
+            print("[RADIO] Isto nao e senha, SSID nem alcance - o radio nem entrou no ar.")
+            print("[RADIO] Confira se a placa tem Wi-Fi (Pico W / Pico 2 W) e se o firmware")
+            print("[RADIO] gravado e o do mesmo modelo da placa.")
+        return ativo
 
     def _aplicar_ip_fixo(self):
         """
@@ -543,6 +576,12 @@ class WifiManager:
               % (self.ip_address, self.config.get("web_port", 80)))
         print("[WIFI] gateway", cfg[2], "| mascara", cfg[1], "| DNS", cfg[3])
 
+    def _virar_sem_radio(self):
+        """Mesmo backoff do aguardando, com estado proprio: o painel e o console
+        precisam distinguir 'a rede sumiu' de 'o radio nao existe'."""
+        self._virar_aguardando()
+        self.state = WIFI_SEM_RADIO
+
     def _virar_aguardando(self):
         base = int(self.config.get("wifi_retry_base_seconds", 5))
         teto = int(self.config.get("wifi_retry_max_seconds", 60))
@@ -589,6 +628,7 @@ class WifiManager:
             "ip": self.ip_address,
             "mode": self.mode,
             "ip_mode": self.get_ip_mode(),
+            "radio_ok": self.state != WIFI_SEM_RADIO,
             "ssid": self.config.get("wifi_ssid", ""),
         }
 
@@ -1342,7 +1382,10 @@ def diagnostico(config, wifi, web_server, readers=()):
     print("\n===== DIAGNOSTICO =====")
 
     print("Wi-Fi   :", wifi.state, "| IP", wifi.ip_address, "| modo", wifi.mode)
-    if wifi.state != WIFI_CONECTADO:
+    if wifi.state == WIFI_SEM_RADIO:
+        print("          RADIO NAO INICIALIZOU - nao adianta mexer em SSID ou senha")
+        print("          confira o modelo da placa e o firmware gravado")
+    elif wifi.state != WIFI_CONECTADO:
         print("          ainda sem rede - o resto do sistema ja esta no ar")
 
     if not config.get("admin_password", ""):
