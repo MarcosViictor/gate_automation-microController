@@ -16,6 +16,11 @@ except ImportError:
     import socket
 
 try:
+    import ubinascii as binascii
+except ImportError:
+    import binascii
+
+try:
     import urequests as requests
 except ImportError:
     try:
@@ -92,10 +97,33 @@ DEFAULT_CONFIG = {
     "web_port": 80,
     # Segredo do POST /open vindo do gatehouse (RASPBERRY_SECRET). Vazio = sem auth.
     "open_token": "",
+    # Login da area de configuracao e das acoes que mexem no portao.
+    # Senha vazia deixa tudo aberto de proposito: trancar por padrao inutilizaria
+    # um Pico ja instalado que subisse este firmware sem senha gravada antes.
+    "admin_user": "admin",
+    "admin_password": "",
 }
 
 CONFIG_FILE = "config.json"
 INDEX_FILE = "wwwroot/index.html"
+CONFIG_PAGE_FILE = "wwwroot/config.html"
+
+# Tudo que le/grava configuracao ou mexe no portao. O painel de status e o
+# historico ficam de fora: sao leitura, e travar isso so atrapalharia a portaria.
+# /open nao entra aqui — tem o proprio segredo, o open_token do gatehouse.
+# Segredos que nunca saem do dispositivo em texto claro. O GET devolve "******"
+# e o POST descarta esse valor, para a tela poder reenviar o formulario inteiro
+# sem apagar o que nao foi digitado de novo.
+MASCARADAS = ("wifi_password", "open_token", "admin_password")
+
+PROTEGIDAS = (
+    "/config",
+    "/config.html",
+    "/api/config",
+    "/api/trigger",
+    "/api/scan",
+    "/api/calibrar",
+)
 
 # Pagina minima servida quando wwwroot/index.html nao esta no dispositivo.
 # Curta de proposito: fica residente na RAM, ao contrario da UI real.
@@ -1081,8 +1109,18 @@ class WebServer:
             return
         method, path, auth, body = req
 
+        # Uma guarda so, na entrada: espalhar o if por rota deixa a proxima rota
+        # protegida a um esquecimento de distancia.
+        if path in PROTEGIDAS and not self._autorizado(auth):
+            print("[AUTH] Recusado:", method, path)
+            self._pedir_login(client_sock, json_esperado=path.startswith("/api/"))
+            return
+
         if method == "GET" and path in ("/", "/index.html"):
             self._send_file(client_sock, INDEX_FILE)
+
+        elif method == "GET" and path in ("/config", "/config.html"):
+            self._send_file(client_sock, CONFIG_PAGE_FILE)
 
         elif method == "GET" and path == "/health":
             # Contrato do gatehouse: indicador de "Pi online" no dashboard.
@@ -1101,14 +1139,14 @@ class WebServer:
 
         elif method == "GET" and path == "/api/config":
             cfg = dict(self.config.config)
-            cfg["wifi_password"] = "******" if cfg.get("wifi_password") else ""
-            cfg["open_token"] = "******" if cfg.get("open_token") else ""
+            for masked in MASCARADAS:
+                cfg[masked] = "******" if cfg.get(masked) else ""
             self._send_json(client_sock, cfg)
 
         elif method == "POST" and path == "/api/config":
             try:
                 payload = json.loads(body or "{}")
-                for masked in ("wifi_password", "open_token"):
+                for masked in MASCARADAS:
                     if payload.get(masked) == "******":
                         del payload[masked]
                 antes = self._chaves_de_rede()
@@ -1195,6 +1233,37 @@ class WebServer:
                                                  for r in self.readers if r.last_frame]},
                         status=400)
 
+    # --- autenticacao da area protegida ---
+
+    def _autorizado(self, auth):
+        """
+        Confere o header Authorization: Basic.
+
+        Senha vazia libera tudo, e isso e deliberado: um Pico ja instalado que
+        recebesse este firmware sem senha gravada antes ficaria inacessivel pela
+        propria tela que define a senha. O aviso no boot cobre o risco.
+        """
+        senha = self.config.get("admin_password", "")
+        if not senha:
+            return True
+        if not auth or not auth.lower().startswith("basic "):
+            return False
+        try:
+            cru = binascii.a2b_base64(auth.split(None, 1)[1]).decode("utf-8")
+        except Exception:
+            return False
+        usuario, _sep, informada = cru.partition(":")
+        return usuario == self.config.get("admin_user", "admin") and informada == senha
+
+    def _pedir_login(self, client_sock, json_esperado=True):
+        cabecalho = 'WWW-Authenticate: Basic realm="Gate Automation"'
+        if json_esperado:
+            self._send_json(client_sock, {"success": False, "error": "Autenticacao necessaria"},
+                            status=401, extra=cabecalho)
+        else:
+            self._send_response(client_sock, 401, "text/html; charset=utf-8",
+                                "<h2>401 - Autenticacao necessaria</h2>", extra=cabecalho)
+
     def _chaves_de_rede(self):
         return tuple(self.config.get(chave) for chave in (
             "wifi_ssid", "wifi_password",
@@ -1244,20 +1313,24 @@ class WebServer:
                     break
                 client_sock.sendall(chunk)
 
-    def _send_headers(self, client_sock, status, content_type, length):
+    def _send_headers(self, client_sock, status, content_type, length, extra=None):
         reason = {200: "OK", 400: "Bad Request", 401: "Unauthorized",
                   404: "Not Found", 409: "Conflict"}.get(status, "OK")
-        header = "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n"
-        client_sock.sendall(header.format(status, reason, content_type, length).encode("utf-8"))
+        header = ("HTTP/1.1 %s %s\r\nContent-Type: %s\r\nContent-Length: %s\r\n"
+                  % (status, reason, content_type, length))
+        if extra:
+            header += extra + "\r\n"
+        header += "Connection: close\r\n\r\n"
+        client_sock.sendall(header.encode("utf-8"))
 
-    def _send_json(self, client_sock, data, status=200):
+    def _send_json(self, client_sock, data, status=200, extra=None):
         body = json.dumps(data).encode("utf-8")
-        self._send_headers(client_sock, status, "application/json", len(body))
+        self._send_headers(client_sock, status, "application/json", len(body), extra)
         client_sock.sendall(body)
 
-    def _send_response(self, client_sock, status_code, content_type, body_text):
+    def _send_response(self, client_sock, status_code, content_type, body_text, extra=None):
         body = body_text.encode("utf-8")
-        self._send_headers(client_sock, status_code, content_type, len(body))
+        self._send_headers(client_sock, status_code, content_type, len(body), extra)
         client_sock.sendall(body)
 
 
@@ -1272,7 +1345,20 @@ def diagnostico(config, wifi, web_server, readers=()):
     if wifi.state != WIFI_CONECTADO:
         print("          ainda sem rede - o resto do sistema ja esta no ar")
 
+    if not config.get("admin_password", ""):
+        print("SEGURANCA: admin_password vazio - configuracao e acionamento SEM SENHA")
+        print("           defina uma senha em /config antes de usar em producao")
+    else:
+        print("Auth    : area de configuracao protegida (usuario '%s')"
+              % config.get("admin_user", "admin"))
+
     # A UI e servida do flash; sem o arquivo, GET / responde 404.
+    try:
+        tamanho = os.stat(CONFIG_PAGE_FILE)[6]
+        print("Config  :", CONFIG_PAGE_FILE, "OK -", tamanho, "bytes")
+    except Exception:
+        print("Config  : FALTA", CONFIG_PAGE_FILE, "- GET /config responde 404")
+
     try:
         tamanho = os.stat(INDEX_FILE)[6]
         print("UI      :", INDEX_FILE, "OK -", tamanho, "bytes")
