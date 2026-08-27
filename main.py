@@ -42,6 +42,14 @@ DEFAULT_CONFIG = {
     # Backoff entre tentativas quando a rede esta fora: dobra ate o teto.
     "wifi_retry_base_seconds": 5,
     "wifi_retry_max_seconds": 60,
+    # IP fixo na rede da empresa. wifi_static_ip vazio = DHCP.
+    # Se a associacao estourar o timeout com IP fixo, cai para DHCP ate reiniciar
+    # ou salvar config nova: rede privada mal configurada nao pode deixar o
+    # portao inalcancavel.
+    "wifi_static_ip": "",
+    "wifi_subnet_mask": "255.255.255.0",
+    "wifi_gateway": "",
+    "wifi_dns": "8.8.8.8",
     # IP do SB Gatehouse na LAN (docker expoe 8001). Sem DNS e sem saida externa.
     "server_base_url": "http://192.168.0.100:8001",
     "access_path": ACCESS_PATH,
@@ -350,6 +358,9 @@ class WifiManager:
         self._deadline = 0
         self._backoff = 0
         self._last_code = None
+        # Ligado quando o IP fixo falha; a partir dai as tentativas vao em DHCP.
+        self._dhcp_forcado = False
+        self._ip_fixo_ativo = False
 
     @property
     def is_connected(self):
@@ -394,6 +405,7 @@ class WifiManager:
         precisaria reiniciar na mao — o modo AP nao serviria para nada.
         """
         self._backoff = 0
+        self._dhcp_forcado = False
         self._iniciar_sta()
 
     # --- transicoes ---
@@ -414,6 +426,7 @@ class WifiManager:
         self.mode = "STA"
         self.wlan = network.WLAN(network.STA_IF)
         self.wlan.active(True)
+        self._aplicar_ip_fixo()
         print("Tentando conectar a rede Wi-Fi:", ssid)
         try:
             self.wlan.connect(ssid, self.config.get("wifi_password", "").strip())
@@ -423,6 +436,38 @@ class WifiManager:
         self._last_code = None
         self.state = WIFI_ASSOCIANDO
         self._deadline = ticks_add(ticks_ms(), int(self.config.get("wifi_timeout", 30)) * 1000)
+
+    def _aplicar_ip_fixo(self):
+        """
+        Fixa o IP antes do connect(), quando configurado.
+
+        Depois de associado nao adianta: o DHCP ja respondeu e trocar o endereco
+        derruba a sessao. Por isso o ifconfig vem antes, e a validacao dos campos
+        tambem — IP fixo sem gateway nao roteia, e melhor cair em DHCP avisando.
+        """
+        self._ip_fixo_ativo = False
+
+        ip = str(self.config.get("wifi_static_ip", "") or "").strip()
+        if not ip:
+            return
+        if self._dhcp_forcado:
+            print("[WIFI] IP fixo desativado nesta sessao; usando DHCP.")
+            return
+
+        mask = str(self.config.get("wifi_subnet_mask", "") or "").strip()
+        gw = str(self.config.get("wifi_gateway", "") or "").strip()
+        dns = str(self.config.get("wifi_dns", "") or "").strip() or gw
+
+        if not mask or not gw:
+            print("[WIFI] IP fixo ignorado: mascara ou gateway em branco. Usando DHCP.")
+            return
+
+        try:
+            self.wlan.ifconfig((ip, mask, gw, dns))
+            self._ip_fixo_ativo = True
+            print("[WIFI] IP fixo", ip, "| mascara", mask, "| gateway", gw, "| DNS", dns)
+        except Exception as exc:
+            print("[WIFI] Erro ao aplicar IP fixo:", exc, "- usando DHCP.")
 
     def _em_associando(self):
         if self.is_connected:
@@ -441,7 +486,14 @@ class WifiManager:
             return
 
         if ticks_diff(ticks_ms(), self._deadline) >= 0:
-            print("[WIFI] Rede indisponivel no momento.")
+            if self._ip_fixo_ativo and not self._dhcp_forcado:
+                # Conferir a config aqui e impossivel: o radio nao diz "esse IP
+                # ja e de outro host". So sobra tentar sem ele.
+                self._dhcp_forcado = True
+                self._ip_fixo_ativo = False
+                print("[WIFI] IP fixo falhou, tentando DHCP.")
+            else:
+                print("[WIFI] Rede indisponivel no momento.")
             self._virar_aguardando()
 
     def _em_conectado(self):
@@ -508,8 +560,16 @@ class WifiManager:
             "state": self.state,
             "ip": self.ip_address,
             "mode": self.mode,
+            "ip_mode": self.get_ip_mode(),
             "ssid": self.config.get("wifi_ssid", ""),
         }
+
+    def get_ip_mode(self):
+        if self._ip_fixo_ativo:
+            return "static"
+        if self._dhcp_forcado:
+            return "dhcp (fallback)"
+        return "dhcp"
 
 
 # Estados do portao derivados dos dois fins de curso.
@@ -1051,11 +1111,13 @@ class WebServer:
                 for masked in ("wifi_password", "open_token"):
                     if payload.get(masked) == "******":
                         del payload[masked]
-                antes = (self.config.get("wifi_ssid"), self.config.get("wifi_password"))
+                antes = self._chaves_de_rede()
                 self.config.update(payload)
                 # Mudou a rede? Tenta agora — inclusive para sair do modo AP,
-                # que e justamente onde o operador corrige a senha.
-                if (self.config.get("wifi_ssid"), self.config.get("wifi_password")) != antes:
+                # que e justamente onde o operador corrige a senha. O IP fixo
+                # entra na comparacao: salvar o endereco e so ver efeito depois
+                # de reiniciar na mao seria uma armadilha.
+                if self._chaves_de_rede() != antes:
                     self.wifi.reconfigurado()
                 self._send_json(client_sock, {"success": True, "message": "Configuracoes salvas com sucesso!"})
             except Exception as exc:
@@ -1132,6 +1194,12 @@ class WebServer:
                                       "frames": ["".join(["%02X" % b for b in r.last_frame])
                                                  for r in self.readers if r.last_frame]},
                         status=400)
+
+    def _chaves_de_rede(self):
+        return tuple(self.config.get(chave) for chave in (
+            "wifi_ssid", "wifi_password",
+            "wifi_static_ip", "wifi_subnet_mask", "wifi_gateway", "wifi_dns",
+        ))
 
     def _handle_open(self, client_sock, auth, body):
         """
