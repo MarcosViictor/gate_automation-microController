@@ -55,7 +55,7 @@ DEFAULT_CONFIG = {
     "access_path": ACCESS_PATH,
     "auth_header": "",
     "server_timeout": 1,
-    "relay_pin": 18,
+    "relay_pin": 16,
     "gate_open_duration": 5,
     "pin_barrier": 2,
     # Fins de curso do portao. pin_hall (chave antiga, sensor unico) ainda e
@@ -708,7 +708,7 @@ class GateRelay:
         self.setup_gpio()
 
     def setup_gpio(self):
-        pin_num = self.config.get("relay_pin", 18)
+        pin_num = self.config.get("relay_pin", 16)
         try:
             Pin(pin_num, Pin.IN)  # repouso em alta impedancia
             print("GPIO do rele configurado no pino", pin_num)
@@ -727,7 +727,7 @@ class GateRelay:
         if duration is None:
             duration = self.config.get("gate_open_duration", 5)
 
-        pin_num = self.config.get("relay_pin", 18)
+        pin_num = self.config.get("relay_pin", 16)
         try:
             relay = Pin(pin_num, Pin.OUT)
             relay.value(0)
@@ -753,7 +753,7 @@ class GateRelay:
         self._close()
 
     def _close(self):
-        pin_num = self.config.get("relay_pin", 18)
+        pin_num = self.config.get("relay_pin", 16)
         try:
             Pin(pin_num, Pin.IN)  # volta para alta impedancia
             print("Portao FECHADO - alta impedancia no pino", pin_num)
@@ -768,7 +768,7 @@ class GateRelay:
     def get_status(self):
         return {
             "is_busy": self.is_busy,
-            "relay_pin": self.config.get("relay_pin", 18),
+            "relay_pin": self.config.get("relay_pin", 16),
             "gate_open_duration": self.config.get("gate_open_duration", 5),
             "last_status": self.last_action_status,
         }

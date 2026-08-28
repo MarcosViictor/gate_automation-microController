@@ -639,7 +639,7 @@
             <div class="form-row" style="margin-bottom: 16px;">
               <div class="form-group" style="margin-bottom:0;">
                 <label for="cfg-relay-pin">Pino GPIO do Relé:</label>
-                <input type="number" id="cfg-relay-pin" class="form-control" value="18" required>
+                <input type="number" id="cfg-relay-pin" class="form-control" value="16" required>
               </div>
               <div class="form-group" style="margin-bottom:0;">
                 <label for="cfg-gate-duration">Tempo Pulso Relé (segundos):</label>
@@ -922,7 +922,7 @@
           document.getElementById('cfg-gateway').value = cfg.wifi_gateway || '';
           document.getElementById('cfg-dns').value = cfg.wifi_dns || '';
           document.getElementById('cfg-server-url').value = cfg.server_base_url || '';
-          document.getElementById('cfg-relay-pin').value = cfg.relay_pin || 18;
+          document.getElementById('cfg-relay-pin').value = cfg.relay_pin || 16;
           document.getElementById('cfg-gate-duration').value = cfg.gate_open_duration || 5;
           document.getElementById('cfg-pin-barrier').value = cfg.pin_barrier || 2;
           document.getElementById('cfg-pin-hall-closed').value = cfg.pin_hall_closed != null ? cfg.pin_hall_closed : (cfg.pin_hall || 3);
