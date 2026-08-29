@@ -17,7 +17,7 @@
     "pin_barrier": 2,
     "pin_hall_a": 3,
     "pin_hall_b": 4,
-    "hall_active_low": 1,
+    "hall_active_low": 0,
     "reader_in_uart": 1,
     "reader_in_rx": 5,
     "reader_out_uart": 0,

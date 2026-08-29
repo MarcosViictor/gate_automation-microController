@@ -65,7 +65,7 @@ DEFAULT_CONFIG = {
     # Nivel que significa "ima presente / fim de curso atingido". Com PULL_UP o
     # normal e 0; inverta aqui se o sensor instalado for normalmente fechado,
     # em vez de mexer no codigo com o portao na bancada.
-    "hall_active_low": 1,
+    "hall_active_low": 0,
     # Dois leitores. No RP2040 o GP5 e RX da UART1 e o GP1 e RX da UART0.
     # So RX e configurado: os leitores transmitem sozinhos, entao os TX
     # ficam livres para outros usos.
@@ -833,10 +833,17 @@ class GateRelay:
         }
 
 
-# Segundos entre 1970-01-01 e 2000-01-01. A porta rp2 do MicroPython conta o
-# time.time() a partir de 2000; JavaScript e o resto do mundo contam de 1970.
-# Sem somar isto, um horario correto no Pico aparece 30 anos no passado na tela.
-UNIX_EPOCH_OFFSET = 946684800
+# Quanto somar ao time.mktime() local para chegar no epoch Unix (1970).
+#
+# A epoca NAO e a mesma em todo MicroPython: portas baremetal costumam contar
+# de 2000-01-01, mas o build rp2 deste Pico conta de 1970 e inicia o RTC em
+# 2021-01-01. Assumir uma das duas erra por 30 anos, entao medimos: mktime de
+# 2000-01-01 devolve 0 numa porta de epoca 2000 e 946684800 numa de epoca 1970.
+UNIX_EM_2000 = 946684800
+try:
+    EPOCH_SHIFT = UNIX_EM_2000 - time.mktime((2000, 1, 1, 0, 0, 0, 0, 0))
+except Exception:
+    EPOCH_SHIFT = 0
 
 _MESES = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
           "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
@@ -892,11 +899,11 @@ class Relogio:
             mes = _MESES[partes[2]]
             ano = int(partes[3])
             h, m, seg = [int(x) for x in partes[4].split(":")]
-            # mktime aqui devolve segundos desde 2000-01-01 e trata a tupla como
-            # UTC, que e o que o header entrega. A conversao para fuso local fica
-            # com o navegador, no toLocaleTimeString.
-            desde_2000 = time.mktime((ano, mes, dia, h, m, seg, 0, 0))
-            unix = desde_2000 + UNIX_EPOCH_OFFSET
+            # mktime trata a tupla como UTC, que e o que o header entrega; o
+            # EPOCH_SHIFT leva do epoch da porta para o Unix. A conversao de fuso
+            # fica com o navegador, no toLocaleTimeString.
+            local = time.mktime((ano, mes, dia, h, m, seg, 0, 0))
+            unix = local + EPOCH_SHIFT
         except Exception as exc:
             print("[RELOGIO] Header Date ilegivel:", valor, "-", exc)
             return False
