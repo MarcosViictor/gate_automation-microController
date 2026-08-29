@@ -24,7 +24,7 @@
     "reader_out_rx": 1,
     "reader_baudrate": 115200,
     "frame_gap_ms": 30,
-    "tag_offset": 0,
+    "tag_offset": 18,
     "tag_trim": 4,
     "tag_offset_threshold": 20,
     "tag_debug": 1,

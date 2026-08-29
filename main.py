@@ -76,9 +76,12 @@ DEFAULT_CONFIG = {
     "reader_baudrate": 115200,
     # Fim de frame por silencio: frames EPC sao binarios e nao tem terminador.
     "frame_gap_ms": 30,
-    # Extracao do codigo (ver parse_tag_frame). tag_offset comeca em 0: o valor
-    # real depende do leitor e se calibra com tag_debug ligado.
-    "tag_offset": 0,
+    # Extracao do codigo (ver parse_tag_frame). Os valores sao os mesmos do
+    # read_tag.py usado no cadastro (offset=18, trim=4): o codigo lido no
+    # portao TEM de ser identico ao gravado no SBS, que compara string exata.
+    # O frame do leitor e "CT" + comprimento + 14 bytes de metadados + EPC,
+    # entao o corte de 18 bytes cai exatamente no inicio do EPC.
+    "tag_offset": 18,
     "tag_trim": 4,
     "tag_offset_threshold": 20,
     "tag_debug": 1,
