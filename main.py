@@ -807,6 +807,86 @@ class GateRelay:
         }
 
 
+# Segundos entre 1970-01-01 e 2000-01-01. A porta rp2 do MicroPython conta o
+# time.time() a partir de 2000; JavaScript e o resto do mundo contam de 1970.
+# Sem somar isto, um horario correto no Pico aparece 30 anos no passado na tela.
+UNIX_EPOCH_OFFSET = 946684800
+
+_MESES = {"Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+          "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12}
+
+
+class Relogio:
+    """
+    Hora de parede do Pico, aprendida do header Date do gatehouse.
+
+    O RP2040 nao tem RTC com bateria e a rede do portao nao tem saida externa,
+    entao nao ha NTP: sem isto o time.time() conta segundos desde o boot e todo
+    registro nasce em 1970 + tempo ligado.
+
+    Guarda um OFFSET em vez de acertar o RTC de proposito. O time.time() segue
+    monotonico para quem depende de duracao — dedup de tag, TTL do historico,
+    idade do outbox — e um salto de 26 anos no meio da operacao nao os afeta.
+
+    Enquanto nao sincroniza, agora_unix() devolve None. Melhor a tela dizer que
+    nao sabe a hora do que carimbar um horario inventado num log de acesso.
+    """
+
+    def __init__(self):
+        self._offset = None
+        self.ultima_sync = None
+
+    @property
+    def sincronizado(self):
+        return self._offset is not None
+
+    def agora_unix(self):
+        """Epoch Unix em UTC, ou None enquanto o relogio nao foi acertado."""
+        if self._offset is None:
+            return None
+        return int(time.time() + self._offset)
+
+    def sincronizar_de_http_date(self, valor):
+        """
+        Acerta o relogio a partir de um header Date (RFC 7231), sempre em GMT:
+            Sat, 29 Aug 2026 14:03:21 GMT
+
+        Devolve True se acertou. Nao ha strptime no MicroPython, entao o parse e
+        manual. Qualquer formato inesperado devolve False sem levantar: o header
+        vem de fora e nao pode derrubar a leitura de tag.
+        """
+        if not valor:
+            return False
+        try:
+            partes = valor.split()
+            # ['Sat,', '29', 'Aug', '2026', '14:03:21', 'GMT']
+            if len(partes) < 5:
+                return False
+            dia = int(partes[1])
+            mes = _MESES[partes[2]]
+            ano = int(partes[3])
+            h, m, seg = [int(x) for x in partes[4].split(":")]
+            # mktime aqui devolve segundos desde 2000-01-01 e trata a tupla como
+            # UTC, que e o que o header entrega. A conversao para fuso local fica
+            # com o navegador, no toLocaleTimeString.
+            desde_2000 = time.mktime((ano, mes, dia, h, m, seg, 0, 0))
+            unix = desde_2000 + UNIX_EPOCH_OFFSET
+        except Exception as exc:
+            print("[RELOGIO] Header Date ilegivel:", valor, "-", exc)
+            return False
+
+        novo = unix - time.time()
+        primeira = self._offset is None
+        self._offset = novo
+        self.ultima_sync = time.time()
+        if primeira:
+            print("[RELOGIO] Acertado pelo gatehouse:", valor)
+        return True
+
+    def get_status(self):
+        return {"sincronizado": self.sincronizado, "agora_unix": self.agora_unix()}
+
+
 class ServerClient:
     """
     Cliente HTTP do SB Gatehouse.
@@ -818,11 +898,15 @@ class ServerClient:
     ATENCAO: 200 NAO significa autorizado. A decisao vem no corpo, em "open".
     """
 
-    def __init__(self, config_manager):
+    def __init__(self, config_manager, relogio=None):
         self.config = config_manager
+        self.relogio = relogio
         # Nem toda versao do urequests aceita 'timeout'. Descobrimos na primeira
         # requisicao e lembramos, para nao pagar a excecao a cada tag lida.
         self._aceita_timeout = True
+        # Nem todo urequests guarda os headers da resposta. Se nao guardar, o
+        # relogio nunca acerta por aqui — avisamos uma vez e seguimos.
+        self._avisou_sem_headers = False
 
     def _endpoint(self):
         base = self.config.get("server_base_url", DEFAULT_CONFIG["server_base_url"])
@@ -842,6 +926,7 @@ class ServerClient:
         res = None
         try:
             res = self._enviar(payload, headers)
+            self._acertar_relogio(res)
             status = res.status_code
             try:
                 body = res.json()
@@ -859,6 +944,30 @@ class ServerClient:
                     res.close()
                 except Exception:
                     pass
+
+    def _acertar_relogio(self, res):
+        """
+        Aproveita o header Date da resposta para dar hora ao Pico.
+
+        E de graca: a requisicao ja acontece a cada tag lida, e o gatehouse e
+        uma fonte de hora melhor que nenhuma numa rede sem saida externa.
+        """
+        if self.relogio is None:
+            return
+        cabecalhos = getattr(res, "headers", None)
+        if not cabecalhos:
+            if not self._avisou_sem_headers:
+                self._avisou_sem_headers = True
+                print("[RELOGIO] Este urequests nao expoe os headers da resposta;")
+                print("[RELOGIO] o horario dos registros ficara indisponivel.")
+            return
+        for chave in ("Date", "date", b"Date", b"date"):
+            valor = cabecalhos.get(chave)
+            if valor:
+                if isinstance(valor, bytes):
+                    valor = valor.decode("utf-8", "ignore")
+                self.relogio.sincronizar_de_http_date(valor)
+                return
 
     def _enviar(self, payload, headers):
         """
@@ -925,12 +1034,13 @@ class ServerClient:
 
 
 class TagManager:
-    def __init__(self, config_manager, server_client, sensor_manager, gate_relay, storage_manager=None):
+    def __init__(self, config_manager, server_client, sensor_manager, gate_relay, storage_manager=None, relogio=None):
         self.config = config_manager
         self.server_client = server_client
         self.sensor_manager = sensor_manager
         self.gate_relay = gate_relay
         self.storage_manager = storage_manager
+        self.relogio = relogio
         self.access_logs = []
         self.max_logs = 50
         self.last_authorized_time = 0
@@ -990,7 +1100,10 @@ class TagManager:
             reason = "Acesso concedido. Portão acionado!" if success else "Erro ao acionar portão: " + str(message)
 
         log_entry = {
-            "timestamp": time.time(),
+            # Epoch Unix em UTC, ou None enquanto o relogio nao foi acertado.
+            # A tela converte para o fuso de quem olha; nao carimbamos hora
+            # inventada num registro de acesso.
+            "timestamp": self.relogio.agora_unix() if self.relogio else None,
             "tag_code": tag_code,
             "authorized": authorized,
             "gate_triggered": gate_triggered,
@@ -1127,6 +1240,9 @@ class WebServer:
                 "readers": [r.get_status() for r in self.readers],
                 "wifi": self.wifi.get_status(),
                 "relay": self.relay.get_status(),
+                "relogio": (self.tags.relogio.get_status()
+                            if getattr(self.tags, "relogio", None) else
+                            {"sincronizado": False, "agora_unix": None}),
             })
 
         elif method == "GET" and path == "/api/config":
@@ -1351,9 +1467,11 @@ def main():
     wifi.connect()
     sensors = SensorManager(config)
     relay = GateRelay(config, sensor_manager=sensors)
-    server_client = ServerClient(config)
+    relogio = Relogio()
+    server_client = ServerClient(config, relogio=relogio)
     storage_manager = StorageManager(config) if StorageManager else None
-    tag_mgr = TagManager(config, server_client, sensors, relay, storage_manager=storage_manager)
+    tag_mgr = TagManager(config, server_client, sensors, relay,
+                         storage_manager=storage_manager, relogio=relogio)
     readers = [
         TagReader(config, config.get("reader_in_uart", 1),
                   config.get("reader_in_rx", 5), "entrada"),

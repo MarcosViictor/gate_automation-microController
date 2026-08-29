@@ -866,7 +866,14 @@
             const tr = document.createElement('tr');
 
             const tdTime = document.createElement('td');
-            tdTime.textContent = new Date(log.timestamp * 1000).toLocaleTimeString();
+            // timestamp e epoch Unix em UTC, ou null enquanto o Pico nao sabe a
+            // hora (ele nao tem RTC e a aprende do header Date do gatehouse).
+            // toLocaleTimeString ja converte para o fuso de quem esta olhando.
+            tdTime.textContent = log.timestamp
+              ? new Date(log.timestamp * 1000).toLocaleTimeString('pt-BR')
+              : '\u2014';
+            tdTime.title = log.timestamp ? new Date(log.timestamp * 1000).toLocaleString('pt-BR')
+                                         : 'Relógio do Pico ainda não sincronizado';
             tr.appendChild(tdTime);
 
             const tdCode = document.createElement('td');
