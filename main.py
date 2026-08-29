@@ -607,8 +607,8 @@ class SensorManager:
     de quantos veem ima, nao de qual deles ve:
 
         2 imas -> Fechado       (os dois imas alinhados com os dois sensores)
-        1 ima  -> Aberto        (o ima da posicao aberta alcanca um sensor so)
-        0 imas -> Em movimento  (o portao esta entre as duas posicoes)
+        1 ima  -> Em movimento  (um ima ja saiu, o portao esta no curso)
+        0 imas -> Aberto        (os dois imas longe dos sensores)
 
     Por isso os dois pinos sao intercambiaveis, e trocar os fios entre eles nao
     muda nada. Nenhuma combinacao e impossivel, entao nao ha estado de erro
@@ -680,8 +680,8 @@ class SensorManager:
         if imas == 2:
             return GATE_FECHADO
         if imas == 1:
-            return GATE_ABERTO
-        return GATE_MOVIMENTO
+            return GATE_MOVIMENTO
+        return GATE_ABERTO
 
     def get_hall_status(self):
         """Nome antigo, agora devolvendo o estado vindo dos dois halls."""

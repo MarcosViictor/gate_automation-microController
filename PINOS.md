@@ -53,9 +53,9 @@ inverta essa chave em vez de mexer no código.
 
 | Halls vendo ímã | Estado | Acesso por tag aciona? |
 |---|---|---|
-| 2 | `Fechado` | **sim** |
-| 1 (qualquer um) | `Aberto` | não — já está aberto |
-| 0 | `Em movimento` | não — deixa terminar o curso |
+| 2 | `Fechado` — os dois ímãs alinhados | **sim** |
+| 1 (qualquer um) | `Em movimento` — um ímã já saiu | não — deixa terminar o curso |
+| 0 | `Aberto` — os dois ímãs longe | não — já está aberto |
 | um dos `Pin()` falhou | `Hall indisponivel` | sim — sensor quebrado não tranca o portão |
 
 Não existe mais o estado `Erro nos sensores`. Ele significava "os dois
