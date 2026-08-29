@@ -76,13 +76,21 @@ DEFAULT_CONFIG = {
     "reader_baudrate": 115200,
     # Fim de frame por silencio: frames EPC sao binarios e nao tem terminador.
     "frame_gap_ms": 30,
-    # Extracao do codigo (ver parse_tag_frame). Os valores sao os mesmos do
-    # read_tag.py usado no cadastro (offset=18, trim=4): o codigo lido no
-    # portao TEM de ser identico ao gravado no SBS, que compara string exata.
-    # O frame do leitor e "CT" + comprimento + 14 bytes de metadados + EPC,
-    # entao o corte de 18 bytes cai exatamente no inicio do EPC.
-    "tag_offset": 18,
-    "tag_trim": 4,
+    # Extracao do codigo (ver parse_tag_frame). Valores conferidos contra tags
+    # reais cadastradas no SBS, que compara string exata.
+    #
+    # O frame e "CT" + comprimento + metadados + codigo. O corte de 17 bytes
+    # inclui o byte 01 que precede o EPC: ele faz parte do codigo gravado no
+    # SBS (as tags reais comecam com 01), nao do cabecalho.
+    #
+    # trim=0 de proposito: os 2 bytes finais NAO sao CRC, sao EPC. Cortar
+    # daria 20 chars e nunca bateria. Como o tamanho do EPC varia por tag
+    # (vimos 26 e 24 chars), so trim=0 preserva os dois.
+    #
+    # Os defaults do read_tag.py (18/4) NAO servem aqui: aquele script le por
+    # HID, com outro enquadramento. Nao copie os numeros de la.
+    "tag_offset": 17,
+    "tag_trim": 0,
     "tag_offset_threshold": 20,
     "tag_debug": 1,
     # O leitor repete a tag enquanto o cartao esta proximo; ignora releituras.
