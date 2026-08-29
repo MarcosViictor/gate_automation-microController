@@ -90,6 +90,9 @@ DEFAULT_CONFIG = {
     # Os defaults do read_tag.py (18/4) NAO servem aqui: aquele script le por
     # HID, com outro enquadramento. Nao copie os numeros de la.
     "tag_offset": 17,
+    # Comprimento do codigo em BYTES. As tags reais tem 12 (24 chars hex).
+    # Prevalece sobre tag_trim: ver parse_tag_frame para o porque.
+    "tag_length": 12,
     "tag_trim": 0,
     "tag_offset_threshold": 20,
     "tag_debug": 1,
@@ -118,15 +121,25 @@ FALLBACK_HTML = (
     "<a href='/health'>/health</a></p></body></html>"
 )
 
-def parse_tag_frame(data, offset=0, trim=4, offset_threshold=20):
+def parse_tag_frame(data, offset=0, trim=4, offset_threshold=20, length=0):
     """
     Extrai o codigo da tag de um frame bruto do leitor.
 
-    Mesma regra do read_tag.py usado no cadastro: sem isso o codigo lido no
-    portao nao bate com o gravado no SBS, que compara a string exata.
+    O codigo tem de bater exatamente com o gravado no SBS, que compara string.
 
     Passos: hex -> descarta padding 00 do fim -> corta o cabecalho quando o
-    frame passa do limiar -> junta -> descarta os digitos finais de CRC.
+    frame passa do limiar -> pega o codigo.
+
+    O corte final tem dois modos, e o de comprimento fixo (length) e o correto
+    para este leitor. Motivo: o MESMO cartao ja produziu frames de tamanhos
+    diferentes (o enquadramento por silencio, frame_gap_ms, pode partir um
+    frame e truncar a cauda). Com trim, que conta do fim, um frame truncado
+    devolve um codigo errado em silencio — num controle de acesso e o pior
+    desfecho: nega quem tem direito, ou pior. Com length, um frame curto demais
+    devolve None e a leitura simplesmente e descartada.
+
+    trim continua aceito para nao quebrar quem ja calibrou com ele, mas so
+    entra quando length e 0.
     """
     hex_list = ["%02X" % b for b in data]
 
@@ -139,6 +152,12 @@ def parse_tag_frame(data, offset=0, trim=4, offset_threshold=20):
     if len(hex_list) > offset_threshold:
         hex_list = hex_list[offset:]
 
+    if length:
+        # Frame curto demais nao vira codigo pela metade: vira leitura perdida.
+        if len(hex_list) < length:
+            return None
+        return "".join(hex_list[:length])
+
     texto = "".join(hex_list)
     if trim and len(texto) > trim:
         texto = texto[:-trim]
@@ -147,27 +166,33 @@ def parse_tag_frame(data, offset=0, trim=4, offset_threshold=20):
 
 def calibrar_offset_trim(frame, codigo_esperado, limiar=20):
     """
-    Descobre tag_offset/tag_trim que fazem parse_tag_frame devolver o codigo
-    esperado, ou None se nenhum par servir.
+    Descobre o offset que faz parse_tag_frame devolver o codigo esperado.
 
     Tira o chute da calibracao: em vez de ajustar numeros no escuro, le-se uma
-    tag ja cadastrada, informa-se o codigo dela e os cortes saem por busca.
+    tag ja cadastrada, informa-se o codigo dela e o corte sai por busca.
+
+    O comprimento nao precisa ser procurado — ele e o do proprio codigo
+    informado. Por isso a busca e so pelo offset, e o resultado ja vem no modo
+    de comprimento fixo (tag_trim = 0), que e imune a frame truncado.
 
     Devolve tambem o limiar, porque parse_tag_frame so aplica o offset em
     frames longos — num frame curto o corte nunca valeria e a busca falharia
     sem explicacao. Nesse caso a segunda passada zera o limiar.
     """
     esperado = str(codigo_esperado).strip().upper()
-    if not frame or not esperado:
+    if not frame or not esperado or len(esperado) % 2:
         return None
+
+    comprimento = len(esperado) // 2
 
     for tentativa in (limiar, 0):
         for offset in range(0, len(frame) + 1):
-            for trim in range(0, 17):
-                if parse_tag_frame(frame, offset=offset, trim=trim,
-                                   offset_threshold=tentativa) == esperado:
-                    return {"tag_offset": offset, "tag_trim": trim,
-                            "tag_offset_threshold": tentativa}
+            if parse_tag_frame(frame, offset=offset, trim=0,
+                               offset_threshold=tentativa,
+                               length=comprimento) == esperado:
+                return {"tag_offset": offset, "tag_trim": 0,
+                        "tag_length": comprimento,
+                        "tag_offset_threshold": tentativa}
     return None
 
 
@@ -238,9 +263,10 @@ class TagReader:
         self.last_frame = frame
         codigo = parse_tag_frame(
             frame,
-            offset=self.config.get("tag_offset", 0),
-            trim=self.config.get("tag_trim", 4),
+            offset=self.config.get("tag_offset", 17),
+            trim=self.config.get("tag_trim", 0),
             offset_threshold=self.config.get("tag_offset_threshold", 20),
+            length=self.config.get("tag_length", 12),
         )
         if self.config.get("tag_debug", 0):
             # Como calibrar tag_offset/tag_trim: o valor certo depende do
@@ -1317,8 +1343,8 @@ class WebServer:
             achado = calibrar_offset_trim(leitor.last_frame, esperado, limiar)
             if achado:
                 self.config.update(achado)
-                print("[CALIBRACAO] %s -> offset %d, trim %d, limiar %d"
-                      % (leitor.direction, achado["tag_offset"], achado["tag_trim"],
+                print("[CALIBRACAO] %s -> offset %d, %d bytes, limiar %d"
+                      % (leitor.direction, achado["tag_offset"], achado["tag_length"],
                          achado["tag_offset_threshold"]))
                 self._send_json(client_sock, {
                     "success": True,
@@ -1326,6 +1352,7 @@ class WebServer:
                     "frame": "".join(["%02X" % b for b in leitor.last_frame]),
                     "tag_offset": achado["tag_offset"],
                     "tag_trim": achado["tag_trim"],
+                    "tag_length": achado["tag_length"],
                     "tag_offset_threshold": achado["tag_offset_threshold"],
                     "message": "Calibrado pelo leitor de %s e salvo." % leitor.direction,
                 })

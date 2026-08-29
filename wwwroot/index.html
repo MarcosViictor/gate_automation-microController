@@ -686,19 +686,25 @@
               <div class="form-group" style="margin-bottom:0; grid-column: 1 / -1;">
                 <label for="cal-tag">Calibrar leitura &mdash; código de uma tag já cadastrada:</label>
                 <div style="display:flex; gap:8px;">
-                  <input type="text" id="cal-tag" class="form-control" placeholder="ex.: E28011606000020C5E5A1234">
+                  <input type="text" id="cal-tag" class="form-control" placeholder="ex.: 01E280116060000215A1BF98">
                   <button type="button" class="btn" onclick="calibrar()">🎯 Calibrar</button>
                 </div>
                 <small style="opacity:.75">Aproxime a tag de um leitor, digite o código dela e clique.
-                Os cortes de cabeçalho e CRC são deduzidos e salvos.</small>
+                O corte de cabeçalho é deduzido e salvo; o tamanho sai do próprio código informado.</small>
               </div>
               <div class="form-group" style="margin-bottom:0;">
                 <label for="cfg-tag-offset">Bytes de cabeçalho a cortar:</label>
-                <input type="number" id="cfg-tag-offset" class="form-control" value="0" min="0" required>
+                <input type="number" id="cfg-tag-offset" class="form-control" value="17" min="0" required>
+              </div>
+              <div class="form-group" style="margin-bottom:0;">
+                <label for="cfg-tag-length">Tamanho do código (bytes):</label>
+                <input type="number" id="cfg-tag-length" class="form-control" value="12" min="0" required>
+                <small style="opacity:.75">0 = usar o corte de CRC no lugar.</small>
               </div>
               <div class="form-group" style="margin-bottom:0;">
                 <label for="cfg-tag-trim">Dígitos de CRC a cortar do fim:</label>
-                <input type="number" id="cfg-tag-trim" class="form-control" value="4" min="0" required>
+                <input type="number" id="cfg-tag-trim" class="form-control" value="0" min="0" required>
+                <small style="opacity:.75">Ignorado quando o tamanho acima é maior que 0.</small>
               </div>
               <div class="form-group" style="margin-bottom:0;">
                 <label for="cfg-timeout">Timeout do servidor (s):</label>
@@ -925,8 +931,9 @@
           document.getElementById('cfg-in-rx').value = cfg.reader_in_rx != null ? cfg.reader_in_rx : 5;
           document.getElementById('cfg-out-rx').value = cfg.reader_out_rx != null ? cfg.reader_out_rx : 1;
           document.getElementById('cfg-baudrate').value = cfg.reader_baudrate || 115200;
-          document.getElementById('cfg-tag-offset').value = cfg.tag_offset != null ? cfg.tag_offset : 0;
-          document.getElementById('cfg-tag-trim').value = cfg.tag_trim != null ? cfg.tag_trim : 4;
+          document.getElementById('cfg-tag-offset').value = cfg.tag_offset != null ? cfg.tag_offset : 17;
+          document.getElementById('cfg-tag-length').value = cfg.tag_length != null ? cfg.tag_length : 12;
+          document.getElementById('cfg-tag-trim').value = cfg.tag_trim != null ? cfg.tag_trim : 0;
           document.getElementById('cfg-timeout').value = cfg.server_timeout || 1;
         })
         .catch(err => console.error('Erro ao carregar configuracoes:', err));
@@ -952,6 +959,7 @@
         reader_out_rx: document.getElementById('cfg-out-rx').value,
         reader_baudrate: document.getElementById('cfg-baudrate').value,
         tag_offset: document.getElementById('cfg-tag-offset').value,
+        tag_length: document.getElementById('cfg-tag-length').value,
         tag_trim: document.getElementById('cfg-tag-trim').value,
         server_timeout: document.getElementById('cfg-timeout').value
       };
@@ -981,8 +989,9 @@
         if (d.success) {
           // Reflete na tela os valores achados, para ficarem visiveis e editaveis.
           document.getElementById('cfg-tag-offset').value = d.tag_offset;
+          document.getElementById('cfg-tag-length').value = d.tag_length;
           document.getElementById('cfg-tag-trim').value = d.tag_trim;
-          showToast(d.message + ' (offset ' + d.tag_offset + ', CRC ' + d.tag_trim + ')');
+          showToast(d.message + ' (offset ' + d.tag_offset + ', ' + d.tag_length + ' bytes)');
         } else {
           showToast(d.error);
           if (d.frames && d.frames.length) console.log('Frames lidos:', d.frames);
